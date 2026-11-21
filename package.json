@@ -1,0 +1,32 @@
+{
+  "name": "mcsup-chat-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCSUP 聊天桥插件：采集并分类 Minecraft 聊天与控制台消息，按可插拔平台分发",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "ensure:sdk": "node scripts/ensure-sdk.mjs",
+    "pretypecheck": "node scripts/ensure-sdk.mjs",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "pretest": "node scripts/ensure-sdk.mjs",
+    "test": "vitest run",
+    "prebuild": "node scripts/ensure-sdk.mjs",
+    "build": "mcsup-plugin build --out build",
+    "pretest:real": "node scripts/ensure-sdk.mjs",
+    "test:real": "node scripts/real-host-check.mjs",
+    "verify": "npm run typecheck && npm run test && npm run build && npm run test:real"
+  },
+  "dependencies": {
+    "mcsup-plugin": "file:../mcsup/sdks/typescript",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  }
+}

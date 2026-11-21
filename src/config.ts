@@ -24,13 +24,13 @@ export const configSchema = s.object({
   ),
   forwardCategories: s.optional(
     s.array(s.enum(CATEGORIES), {
-      describe: "转发到平台的类别；省略时转发全部",
+      describe: "转发到平台的类别；省略时只转发玩家聊天（chat），需要加入/离开、死亡等事件时显式追加",
     }),
   ),
   consoleForward: s.boolean({
-    default: true,
+    default: false,
     label: "转发控制台消息",
-    describe: "为 false 时仍采集并入库，但不投递到平台",
+    describe: "为 false（默认）时只采集并入库，不投递到平台；需要转发服务器 say/日志时再打开",
   }),
   storeSize: s.integer({
     default: 200,
@@ -64,6 +64,12 @@ export const configSchema = s.object({
     max: 512,
     label: "入站文本上限",
     describe: "单条外部消息注入游戏前的最大字符数；超长会截断，避免撑爆聊天栏",
+  }),
+  injectMode: s.enum(["tellraw", "say"], {
+    default: "tellraw",
+    label: "注入方式",
+    describe:
+      "tellraw（默认）：游戏里只有 [QQ] 标签，不写服务器日志；say：写进服务器 logs/latest.log，但游戏内会多出 [Server] 前缀。原版只有 say/me 这类服务器广播会进日志，两者不可兼得",
   }),
   log: s.optional(
     s.object(
@@ -129,7 +135,7 @@ export const configSchema = s.object({
         markdown: s.boolean({
           default: false,
           label: "Markdown 发送",
-          describe: "为 false 时用纯文本（msg_type=0），避免玩家消息里的符号被渲染",
+          describe: "为 false 时用纯文本（msg_type=0），避免玩家消息里的符号被渲染；群/私聊镜像图片始终优先走 Markdown 图文",
         }),
         groups: s.optional(
           s.array(s.string({ max: 64, label: "群 openid" }), {
@@ -167,6 +173,18 @@ export const configSchema = s.object({
           default: false,
           label: "接收私聊",
           describe: "是否把私聊消息注入游戏；默认关闭，避免陌生人打扰",
+        }),
+        syncChannels: s.boolean({
+          default: true,
+          label: "群聊/私聊互相同步",
+          describe:
+            "为 true 时，群里收到的 QQ 消息也会转发到私聊目标，私聊收到的也会转发到群目标（同一会话不重复发送）；只影响 QQ 内部的群与私聊，不影响游戏注入",
+        }),
+        forwardMedia: s.boolean({
+          default: true,
+          label: "同步图片",
+          describe:
+            "为 true 时，群/私聊互转会用一条 Markdown 图文消息转发入站图片（文字在前、图片在后）；Markdown 失败自动退回标题文本 + 富媒体上传。QQ 表情统一转为 [表情] 文本",
         }),
         label: s.string({
           default: "QQ",
@@ -262,13 +280,14 @@ export function resolveConfig(raw: RawConfig): BridgeConfig {
     platforms,
     forwardCategories:
       raw.forwardCategories === undefined
-        ? [...CATEGORIES]
+        ? ["chat"]
         : [...new Set(raw.forwardCategories)],
-    consoleForward: raw.consoleForward ?? true,
+    consoleForward: raw.consoleForward ?? false,
     storeSize: raw.storeSize ?? 200,
     queueCapacity: raw.queueCapacity ?? 256,
     inbound: raw.inbound ?? true,
     inboundMaxLength: raw.inboundMaxLength ?? 200,
+    injectMode: raw.injectMode ?? "tellraw",
     ...(raw.inboundServer === undefined ? {} : { inboundServer: raw.inboundServer }),
     platformSettings,
   };

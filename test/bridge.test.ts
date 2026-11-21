@@ -25,6 +25,7 @@ const BASE: BridgeConfig = {
   queueCapacity: 8,
   inbound: true,
   inboundMaxLength: 200,
+  injectMode: "tellraw",
   platformSettings: {},
 };
 
@@ -91,7 +92,7 @@ describe("ChatBridge", () => {
       { server: "survival", from: "Steve", text: "\u00a7a你好", at: AT },
       meta("chat:message"),
     );
-    // 同一行的控制台投影应被跳过
+    // 同一行的控制台投影不再丢弃，而是作为跨源重复被去重
     bridge.ingest(
       "console:line",
       { server: "survival", line: `[12:00:00] [Server thread/INFO]: <Steve> \u00a7a你好`, at: AT },
@@ -103,8 +104,8 @@ describe("ChatBridge", () => {
     const status = bridge.status();
     expect(status.started).toBe(true);
     expect(status.accepted).toBe(2);
-    expect(status.skipped).toBe(1);
-    expect(status.duplicates).toBe(0);
+    expect(status.skipped).toBe(0);
+    expect(status.duplicates).toBe(1);
     expect(status.stored).toBe(2);
     expect(status.categories.chat).toBe(1);
     expect(status.categories.join).toBe(1);
@@ -114,6 +115,79 @@ describe("ChatBridge", () => {
     expect(page.items.map((message) => message.category)).toEqual(["join", "chat"]);
     expect(page.items[1]?.text).toBe("你好");
 
+    await bridge.stop("test");
+  });
+
+  it("离线模式：只有控制台聊天行时也正常入库并转发", async () => {
+    const bridge = newBridge();
+    await bridge.start();
+
+    bridge.ingest(
+      "console:line",
+      {
+        server: "survival",
+        line: "[20:15:04] [Server thread/INFO]: [Not Secure] <Junhsiun> test",
+        at: AT,
+      },
+      meta("console:line"),
+    );
+    await untilDelivered(bridge, 1);
+
+    const status = bridge.status();
+    expect(status.accepted).toBe(1);
+    expect(status.duplicates).toBe(0);
+    expect(status.skipped).toBe(0);
+    expect(status.categories.chat).toBe(1);
+
+    const page = bridge.recent({ limit: 5 });
+    expect(page.items[0]).toMatchObject({
+      category: "chat",
+      source: "chat",
+      from: "Junhsiun",
+      text: "test",
+    });
+    await bridge.stop("test");
+  });
+
+  it("控制台投影先到、结构化聊天后到，也只保留一条", async () => {
+    const bridge = newBridge();
+    await bridge.start();
+
+    bridge.ingest(
+      "console:line",
+      { server: "survival", line: "[12:00:00] [Server thread/INFO]: <Steve> 你好", at: AT },
+      meta("console:line"),
+    );
+    bridge.ingest(
+      "chat:message",
+      { server: "survival", from: "Steve", text: "你好", at: AT },
+      meta("chat:message"),
+    );
+    await untilDelivered(bridge, 1);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const status = bridge.status();
+    expect(status.accepted).toBe(1);
+    expect(status.duplicates).toBe(1);
+    expect(status.stored).toBe(1);
+    expect(status.platforms[0]?.delivered).toBe(1);
+    await bridge.stop("test");
+  });
+
+  it("玩家连发两条相同消息不会被跨源去重误伤", async () => {
+    const bridge = newBridge();
+    await bridge.start();
+
+    for (let i = 0; i < 2; i += 1) {
+      bridge.ingest(
+        "chat:message",
+        { server: "survival", from: "Steve", text: "test", at: `2026-11-21T12:00:0${i}.000Z` },
+        meta("chat:message"),
+      );
+    }
+    await untilDelivered(bridge, 2);
+    expect(bridge.status().accepted).toBe(2);
+    expect(bridge.status().duplicates).toBe(0);
     await bridge.stop("test");
   });
 

@@ -4,7 +4,12 @@ import type { LogClient } from "mcsup-plugin";
 import { ChatBridge, type BridgeConfig } from "../src/core/bridge.js";
 import { CATEGORIES } from "../src/core/types.js";
 import { createRegistry } from "../src/platforms/index.js";
-import type { ChatPlatform, GamePort, PlatformContext } from "../src/platforms/types.js";
+import type {
+  ChatPlatform,
+  GamePort,
+  InjectMode,
+  PlatformContext,
+} from "../src/platforms/types.js";
 
 const AT = "2026-11-21T12:00:00.000Z";
 
@@ -21,6 +26,7 @@ function config(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
     queueCapacity: 4,
     inbound: true,
     inboundMaxLength: 40,
+    injectMode: "tellraw",
     platformSettings: {},
     ...overrides,
   };
@@ -28,7 +34,7 @@ function config(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
 
 interface Harness {
   readonly bridge: ChatBridge;
-  readonly sent: Array<{ readonly server: string; readonly text: string }>;
+  readonly sent: Array<{ readonly server: string; readonly text: string; readonly mode?: InjectMode }>;
   readonly ctx: () => PlatformContext;
 }
 
@@ -57,10 +63,10 @@ async function harness(
       },
     },
   ]);
-  const sent: Array<{ server: string; text: string }> = [];
+  const sent: Array<{ server: string; text: string; mode?: InjectMode }> = [];
   const game: GamePort = {
-    async sendChat(server, text) {
-      sent.push({ server, text });
+    async sendChat(server, text, mode) {
+      sent.push({ server, text, mode });
     },
     async resolveServer(preferred) {
       return preferred ?? "survival";
@@ -108,13 +114,29 @@ describe("入站：平台 → 游戏", () => {
     });
 
     await until(() => test.sent.length === 1);
-    expect(test.sent[0]).toEqual({ server: "creative", text: "[QQ] Alice: 大家好" });
+    expect(test.sent[0]).toEqual({ server: "creative", text: "[QQ] Alice: 大家好", mode: "tellraw" });
     expect(test.bridge.status().inbound).toMatchObject({
       received: 1,
       delivered: 1,
       failed: 0,
       duplicates: 0,
     });
+    await test.bridge.stop("test");
+  });
+
+  it("injectMode 会透传给 GamePort（say 用于写入服务器日志）", async () => {
+    const test = await harness({ cfg: config({ injectMode: "say" }) });
+    test.ctx().inbound({
+      platform: "qq",
+      channel: { kind: "group", id: "123" },
+      author: { id: "42", name: "Alice" },
+      text: "写日志",
+      label: "QQ",
+      messageId: "say-1",
+    });
+
+    await until(() => test.sent.length === 1);
+    expect(test.sent[0]).toMatchObject({ text: "[QQ] Alice: 写日志", mode: "say" });
     await test.bridge.stop("test");
   });
 

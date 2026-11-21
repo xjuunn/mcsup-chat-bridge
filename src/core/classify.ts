@@ -43,7 +43,7 @@ const SYSTEM =
   /^(?:Starting minecraft server|Loading properties|Preparing |Done \(|Stopping (?:the )?server|Saving (?:the game|players|chunks)|Server (?:started|stopped)|Using .+ as config|Generating keypair|Environment: )/;
 
 export type ConsoleResult =
-  | { readonly kind: "message"; readonly draft: MessageDraft }
+  | { readonly kind: "message"; readonly draft: MessageDraft; readonly projection?: boolean }
   | { readonly kind: "skip"; readonly reason: string };
 
 /**
@@ -114,10 +114,21 @@ export function classifyConsoleLine(input: {
     return { kind: "skip", reason: "empty" };
   }
 
-  // 聊天 / 加入 / 离开由宿主同时投递结构化事件，控制台层不再重复
-  if (CHAT_BODY.test(body)) {
-    return { kind: "skip", reason: "structured:chat" };
+  // 聊天行：在线模式下宿主会同时投递 `chat:message`，但离线模式（online-mode=false）
+  // 下控制台行会带 `[Not Secure]` 前缀且宿主不再投递结构化事件——此时若直接丢弃，
+  // 玩家聊天就彻底消失了。因此这里照常产出聊天消息，由桥内核按 (from, text) 与
+  // 结构化事件做跨源去重：两种投递顺序下都只会保留一条。
+  const chat = CHAT_BODY.exec(body);
+  if (chat !== null) {
+    const from = cleanText(chat[1] ?? "");
+    const text = cleanText(chat[2] ?? "");
+    if (from === "" || text === "") {
+      return { kind: "skip", reason: "empty" };
+    }
+    return { kind: "message", projection: true, draft: classifyChat({ ...input, from, text }) };
   }
+
+  // 加入 / 离开仍由结构化事件覆盖（默认也不转发这两类），控制台层不再重复
   if (JOIN_BODY.test(body)) {
     return { kind: "skip", reason: "structured:join" };
   }

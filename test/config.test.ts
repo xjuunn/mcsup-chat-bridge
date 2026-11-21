@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import { PluginError, toZod } from "mcsup-plugin";
 
 import { configSchema, resolveConfig, type RawConfig } from "../src/config.js";
-import { CATEGORIES } from "../src/core/types.js";
 import { createRegistry } from "../src/platforms/index.js";
 import type { PlatformFactory } from "../src/platforms/types.js";
 
@@ -12,8 +11,8 @@ describe("配置解析", () => {
   it("空配置使用默认值", () => {
     const config = resolveConfig(parse({}));
     expect(config.platforms).toEqual(["log"]);
-    expect(config.forwardCategories).toEqual([...CATEGORIES]);
-    expect(config.consoleForward).toBe(true);
+    expect(config.forwardCategories).toEqual(["chat"]);
+    expect(config.consoleForward).toBe(false);
     expect(config.storeSize).toBe(200);
     expect(config.queueCapacity).toBe(256);
     expect(config.platformSettings.log).toBeUndefined();
@@ -62,10 +61,12 @@ describe("配置解析", () => {
     const defaults = resolveConfig(parse({}));
     expect(defaults.inbound).toBe(true);
     expect(defaults.inboundMaxLength).toBe(200);
-    const custom = resolveConfig(parse({ inbound: false, inboundServer: "creative", inboundMaxLength: 64 }));
+    expect(defaults.injectMode).toBe("tellraw");
+    const custom = resolveConfig(parse({ inbound: false, inboundServer: "creative", inboundMaxLength: 64, injectMode: "say" }));
     expect(custom.inbound).toBe(false);
     expect(custom.inboundServer).toBe("creative");
     expect(custom.inboundMaxLength).toBe(64);
+    expect(custom.injectMode).toBe("say");
   });
 });
 

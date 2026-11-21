@@ -383,7 +383,7 @@ export interface GamePort {
 | Hermes 入站的 `MessageEvent` | `C2C_MESSAGE_CREATE` / `GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE` → `PlatformInboundMessage`（channel/author/text/messageId） |
 | 历史去重 fail-open | 适配器按消息 id 记忆 1000 条；内核按 `platform:id` 记 10 分钟 |
 | OpenClaw 的 health 状态 | Hello 心跳 + 最近错误日志；尚未暴露到 `status` |
-| 平台原生消息 → 宿主 | `GamePort.sendChat` 用 `tellraw @a` 注入，JSON 转义；内核做 60 秒回声抑制 |
+| 平台原生消息 → 宿主 | `GamePort.sendChat` 按 `injectMode` 用 `tellraw @a`（默认，单标签、不写服务器日志）或 `say`（写 `latest.log`、多 `[Server]` 前缀）注入；内核做 60 秒回声抑制 |
 
 **密钥与配置**：`qq.clientSecret` 用 SDK `secretInput` 标记为 `x-mcsup-secret`。宿主负责按插件隔离、加密持久化、管理读打码、握手下发明文；插件内部不再落盘，`clientSecret` 只发给官方凭证地址，OpenAPI 的 `access_token` 不写日志。
 

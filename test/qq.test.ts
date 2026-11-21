@@ -5,10 +5,12 @@ import type { LogClient } from "mcsup-plugin";
 
 import type { NormalizedMessage } from "../src/core/types.js";
 import {
+  buildMediaMarkdown,
   formatOutbound,
   INTENT_BITS,
   parseQqSettings,
   QqPlatform,
+  qqInboundImages,
   qqInboundText,
 } from "../src/platforms/qq.js";
 import type { PlatformInboundMessage } from "../src/platforms/types.js";
@@ -52,8 +54,12 @@ interface FakeQq {
   readonly tokenCalls: () => number;
   readonly frames: Array<Record<string, unknown>>;
   readonly posts: Array<{ path: string; body: Record<string, unknown>; auth: string | undefined }>;
-  /** 让下 N 次发消息返回 401 */
-  failNextWith(status: number): void;
+  /** `/files` 富媒体上传请求 */
+  readonly files: Array<{ path: string; body: Record<string, unknown> }>;
+  /** 让下 N 次发消息返回指定错误码 */
+  failNextWith(status: number, code?: number): void;
+  /** 让下 N 次富媒体上传返回 400 */
+  failNextFile(status: number): void;
   ready(): Promise<void>;
   dispatch(type: string, data: Record<string, unknown>, s?: number): void;
   /** 以指定关闭码断开当前 Gateway 连接 */
@@ -69,9 +75,11 @@ interface FakeOptions {
 async function startFakeQq(options: FakeOptions): Promise<FakeQq> {
   const frames: FakeQq["frames"] = [];
   const posts: FakeQq["posts"] = [];
+  const files: FakeQq["files"] = [];
   const sockets: WsSocket[] = [];
   let tokenCount = 0;
-  const forcedFailures: number[] = [];
+  const forcedFailures: Array<{ status: number; code: number }> = [];
+  const fileFailures: number[] = [];
 
   const http: Server = createServer((request, response) => {
     const chunks: Buffer[] = [];
@@ -100,11 +108,22 @@ async function startFakeQq(options: FakeOptions): Promise<FakeQq> {
         return;
       }
 
+      if (url.pathname.endsWith("/files")) {
+        files.push({ path: url.pathname, body });
+        const forced = fileFailures.shift();
+        if (forced !== undefined) {
+          send(forced, { code: 40034002, message: "upload failed" });
+          return;
+        }
+        send(200, { file_uuid: `uuid-${files.length}`, file_info: `fi-${files.length}`, ttl: 3_600, id: `file-${files.length}` });
+        return;
+      }
+
       if (url.pathname.startsWith("/v2/groups/") || url.pathname.startsWith("/v2/users/")) {
         posts.push({ path: url.pathname, body, auth: request.headers.authorization });
         const forced = forcedFailures.shift();
         if (forced !== undefined) {
-          send(forced, { code: 11244, message: "token invalid" });
+          send(forced.status, { code: forced.code, message: "forced failure" });
           return;
         }
         send(200, { id: `sent-${posts.length}`, timestamp: "2026-11-21T12:00:00Z" });
@@ -139,8 +158,12 @@ async function startFakeQq(options: FakeOptions): Promise<FakeQq> {
     tokenCalls: () => tokenCount,
     frames,
     posts,
-    failNextWith(status) {
-      forcedFailures.push(status);
+    files,
+    failNextWith(status, code = 11244) {
+      forcedFailures.push({ status, code });
+    },
+    failNextFile(status) {
+      fileFailures.push(status);
     },
     async ready() {
       await waitFor(() => frames.some((frame) => frame["op"] === 2), "Identify 帧");
@@ -219,6 +242,8 @@ describe("QQ 配置", () => {
     expect(settings.apiBase).toBe("https://api.sgroup.qq.com");
     expect(settings.inbound).toBe(true);
     expect(settings.allowPrivate).toBe(false);
+    expect(settings.syncChannels).toBe(true);
+    expect(settings.forwardMedia).toBe(true);
     expect(settings.markdown).toBe(false);
     expect(settings.passiveReply).toBe(true);
     expect(settings.label).toBe("QQ");
@@ -300,6 +325,35 @@ describe("QQ 消息格式", () => {
         ],
       }),
     ).toBe("看图 [图片] [语音] 你好呀 [文件: a.txt]");
+  });
+
+  it("QQ 表情标签转为 [表情]", () => {
+    expect(
+      qqInboundText({ content: '哈哈<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">好' }),
+    ).toBe("哈哈[表情]好");
+    expect(qqInboundText({ content: '<faceType=1,faceId="13",ext="x"/>' })).toBe("[表情]");
+  });
+
+  it("提取图片 URL 供群/私聊转发", () => {
+    expect(
+      qqInboundImages({
+        attachments: [
+          { content_type: "image/png", url: "https://cdn.test/a.png" },
+          { content_type: "voice", url: "https://cdn.test/a.silk" },
+          { content_type: "image/jpeg", url: "" },
+        ],
+      }),
+    ).toEqual(["https://cdn.test/a.png"]);
+  });
+
+  it("Markdown 图文把文字放在图片前，多余图片补在末尾", () => {
+    expect(buildMediaMarkdown("[群] 小A: 看图 [图片]", ["https://cdn.test/a.png"])).toBe(
+      "[群] 小A: 看图 ![图片](https://cdn.test/a.png)",
+    );
+    expect(buildMediaMarkdown("纯图 [图片]", ["u1", "u2"])).toBe(
+      "纯图 ![图片](u1) ![图片](u2)",
+    );
+    expect(buildMediaMarkdown("没有占位", ["u1"])).toBe("没有占位 ![图片](u1)");
   });
 
   it("引用消息取被引用正文", () => {
@@ -434,6 +488,191 @@ describe("QQ 适配器（假官方 Gateway + REST）", () => {
       author: { id: "u9", name: "Bob" },
       text: "悄悄话",
     });
+  });
+
+  it("群消息镜像到私聊，且不回发来源群", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    startPlatform(fake, { groups: ["g1"], allowPrivate: true, privateUsers: ["u1"] }, inbound);
+    await fake.ready();
+
+    fake.dispatch("GROUP_AT_MESSAGE_CREATE", {
+      id: "g-msg-1",
+      group_openid: "g1",
+      content: "群里的话",
+      author: { member_openid: "u1", member_nickname: "小A" },
+    });
+    await waitFor(() => inbound.length === 1, "群消息入站");
+    await waitFor(() => fake.posts.length >= 1, "镜像到私聊");
+
+    expect(fake.posts[0]?.path).toBe("/v2/users/u1/messages");
+    expect(fake.posts[0]?.body["content"]).toBe("[群] 小A: 群里的话");
+    // 来源群不能收到自己那条消息的副本
+    expect(fake.posts.some((post) => post.path === "/v2/groups/g1/messages")).toBe(false);
+  });
+
+  it("群消息里的图片以单条 Markdown 图文私聊转发，文字在前", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    startPlatform(fake, { groups: ["g1"], allowPrivate: true, privateUsers: ["u1"] }, inbound);
+    await fake.ready();
+
+    fake.dispatch("GROUP_AT_MESSAGE_CREATE", {
+      id: "g-img-1",
+      group_openid: "g1",
+      content: "看图",
+      attachments: [{ content_type: "image/png", url: "https://cdn.test/a.png" }],
+      author: { member_openid: "u1", member_nickname: "小A" },
+    });
+    await waitFor(() => inbound.length === 1, "群图片入站");
+    expect(inbound[0]?.text).toBe("看图 [图片]");
+    await waitFor(() => fake.posts.length >= 1, "转发图片");
+
+    // 单条 Markdown：文字在前、图片在后；不需要 /files 上传
+    expect(fake.files).toHaveLength(0);
+    expect(fake.posts).toHaveLength(1);
+    expect(fake.posts[0]?.path).toBe("/v2/users/u1/messages");
+    expect(fake.posts[0]?.body).toMatchObject({
+      msg_type: 2,
+      markdown: { content: "[群] 小A: 看图 ![图片](https://cdn.test/a.png)" },
+    });
+    expect(fake.posts.some((post) => post.path === "/v2/groups/g1/messages")).toBe(false);
+  });
+
+  it("纯表情消息把贴纸并进同一条 Markdown 消息，不再补 [表情] 占位", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    startPlatform(fake, { groups: ["g1"], allowPrivate: true, privateUsers: ["u1"] }, inbound);
+    await fake.ready();
+
+    fake.dispatch("GROUP_AT_MESSAGE_CREATE", {
+      id: "g-face-1",
+      group_openid: "g1",
+      content: '<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">',
+      attachments: [{ content_type: "image/png", url: "https://cdn.test/face.png" }],
+      author: { member_openid: "u1", member_nickname: "小A" },
+    });
+    await waitFor(() => inbound.length === 1, "群表情入站");
+    expect(inbound[0]?.text).toBe("[表情] [图片]");
+    await waitFor(() => fake.posts.length >= 1, "转发表情");
+
+    expect(fake.posts).toHaveLength(1);
+    expect(fake.posts[0]?.body).toMatchObject({
+      msg_type: 2,
+      markdown: { content: "[群] 小A: ![图片](https://cdn.test/face.png)" },
+    });
+  });
+
+  it("forwardMedia=false 时只发文字占位", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    startPlatform(
+      fake,
+      { groups: ["g1"], allowPrivate: true, privateUsers: ["u1"], forwardMedia: false },
+      inbound,
+    );
+    await fake.ready();
+
+    fake.dispatch("GROUP_AT_MESSAGE_CREATE", {
+      id: "g-img-2",
+      group_openid: "g1",
+      content: "看图",
+      attachments: [{ content_type: "image/png", url: "https://cdn.test/a.png" }],
+      author: { member_openid: "u1", member_nickname: "小A" },
+    });
+    await waitFor(() => inbound.length === 1, "群图片入站");
+    await waitFor(() => fake.posts.length >= 1, "镜像到私聊");
+
+    expect(fake.files).toHaveLength(0);
+    expect(fake.posts[0]?.body["content"]).toBe("[群] 小A: 看图 [图片]");
+  });
+
+  it("Markdown 图文发送失败时退回文本 + 富媒体上传", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    startPlatform(fake, { groups: ["g1"], allowPrivate: true, privateUsers: ["u1"] }, inbound);
+    await fake.ready();
+    fake.failNextWith(400, 40034002);
+
+    fake.dispatch("GROUP_AT_MESSAGE_CREATE", {
+      id: "g-img-3",
+      group_openid: "g1",
+      content: "看图",
+      attachments: [{ content_type: "image/png", url: "https://cdn.test/a.png" }],
+      author: { member_openid: "u1", member_nickname: "小A" },
+    });
+    await waitFor(() => inbound.length === 1, "群图片入站");
+    await waitFor(() => fake.files.length === 1 && fake.posts.length >= 3, "退回富媒体");
+
+    // 第一条是失败的 Markdown 尝试，之后是标题文本 + 富媒体图片
+    expect(fake.posts[0]?.body["msg_type"]).toBe(2);
+    expect(fake.posts[1]?.body).toMatchObject({ msg_type: 0, content: "[群] 小A: 看图" });
+    expect(fake.posts[2]?.body).toMatchObject({ msg_type: 7, media: { file_info: "fi-1" } });
+  });
+
+  it("私聊消息镜像到群，且不回发来源私聊", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    startPlatform(fake, { groups: ["g1"], allowPrivate: true, privateUsers: ["u1"] }, inbound);
+    await fake.ready();
+
+    fake.dispatch("C2C_MESSAGE_CREATE", {
+      id: "c2c-1",
+      content: "私聊的话",
+      author: { user_openid: "u1", username: "小A" },
+    });
+    await waitFor(() => inbound.length === 1, "私聊入站");
+    await waitFor(() => fake.posts.length >= 1, "镜像到群");
+
+    expect(fake.posts[0]?.path).toBe("/v2/groups/g1/messages");
+    expect(fake.posts[0]?.body["content"]).toBe("[私聊] 小A: 私聊的话");
+    expect(fake.posts.some((post) => post.path === "/v2/users/u1/messages")).toBe(false);
+  });
+
+  it("syncChannels=false 时不镜像", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    startPlatform(
+      fake,
+      { groups: ["g1"], allowPrivate: true, privateUsers: ["u1"], syncChannels: false },
+      inbound,
+    );
+    await fake.ready();
+
+    fake.dispatch("GROUP_AT_MESSAGE_CREATE", {
+      id: "g-msg-2",
+      group_openid: "g1",
+      content: "不同步",
+      author: { member_openid: "u1", member_nickname: "小A" },
+    });
+    await waitFor(() => inbound.length === 1, "群消息入站");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(fake.posts).toHaveLength(0);
+  });
+
+  it("只有单一会话时不镜像，避免自我回发", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    startPlatform(fake, { groups: ["g1"] }, inbound);
+    await fake.ready();
+
+    fake.dispatch("GROUP_AT_MESSAGE_CREATE", {
+      id: "g-msg-3",
+      group_openid: "g1",
+      content: "只有群",
+      author: { member_openid: "u1", member_nickname: "小A" },
+    });
+    await waitFor(() => inbound.length === 1, "群消息入站");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(fake.posts).toHaveLength(0);
   });
 
   it("markdown 开关使用 msg_type=2", async () => {

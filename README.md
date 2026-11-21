@@ -7,7 +7,7 @@ MCSUP 聊天桥插件：订阅 Minecraft 服务器的聊天、控制台与生命
 QQ 适配器支持**双向互通**：
 
 - 游戏 → QQ：玩家聊天按 `[玩家名]:消息` 发送到群/私聊；
-- QQ → 游戏：群聊消息（可选私聊）经 `console:write` 以 `tellraw @a` 注入游戏，显示为 `[QQ] 昵称: 消息`。
+- QQ → 游戏：群聊消息（可选私聊）经 `console:write` 以 `tellraw @a` 注入游戏，显示为 `[QQ] 昵称: 消息`（只有一个标签）。
 
 ## 快速开始
 
@@ -25,7 +25,25 @@ npm run test:real
 npm run verify
 ```
 
-依赖 `mcsup-plugin@0.1.0`，通过 `file:../mcsup/sdks/typescript` 引用同级的 SDK 仓库。`scripts/ensure-sdk.mjs` 会比较 SDK 源码与 `dist/index.js` 的 mtime：缺失或过期时用 SDK 自带的 tsc 重新构建，已是最新时零开销。
+### 安装到 MCSUP 宿主
+
+`build/` 只是编译产物，运行期仍需要 `mcsup-plugin`、`ws`、`zod`；而本仓库的
+`mcsup-plugin` 是 `file:../mcsup/sdks/typescript`，npm 在 Windows 上会把它物化成
+Junction。宿主把产物内的任何符号链接视为不可信，会直接拒绝
+（`denied: symbolic link in artifact`），因此**不能把仓库根目录或 `build/` 直接
+当作安装源**。
+
+```powershell
+npm run stage        # 生成自包含产物 artifact/（真实目录依赖，无符号链接）
+mcsup plugin install --from .\artifact --yes
+mcsup plugin verify .\artifact   # 可选：安装前让宿主校验一次
+```
+
+`scripts/stage-artifact.mjs` 会复制 `build/`，只把 SDK 的 `dist` + `package.json`
+和 `ws`、`zod` 以真实目录放进 `artifact/node_modules/`，然后断言产物内没有符号
+链接、文件数与体积未超宿主上限，并用一次真实 ESM 解析自检。
+
+> 依赖 `mcsup-plugin@0.1.0`，通过 `file:../mcsup/sdks/typescript` 引用同级的 SDK 仓库。`scripts/ensure-sdk.mjs` 会比较 SDK 源码与 `dist/index.js` 的 mtime：缺失或过期时用 SDK 自带的 tsc 重新构建，已是最新时零开销。
 
 ## 目录结构
 
@@ -55,7 +73,7 @@ scripts/
 test/                       分类、存储、分发、桥、入站、QQ、配置、事件、MockHost
 ```
 
-构建产物在 `build/`：`manifest.json`、`descriptor.json`、`bin/run.cmd|run.sh`、`bin/entry.mjs`、`dist/`。
+构建产物在 `build/`：`manifest.json`、`descriptor.json`、`bin/run.cmd|run.sh`、`bin/entry.mjs`、`dist/`。`npm run stage` 会把它连同运行期依赖整理成可安装的 `artifact/`。
 
 ## 消息模型
 
@@ -90,11 +108,11 @@ test/                       分类、存储、分发、桥、入站、QQ、配�
 | `advancement` | 进度、挑战、目标 |
 | `other` | 未归类的控制台行（如 DEBUG） |
 
-分类顺序：先跳过与结构化事件重复的控制台投影（聊天 `<name> text`、`joined the game`、`left the game`），再按日志级别、异常栈、命令、进度、死亡、系统行、INFO 兜底、`other` 判定。
+分类顺序：先处理控制台里的聊天投影（`<name> text`，含离线模式的 `[Not Secure]` 前缀）与玩家加入 / 离开，再按日志级别、异常栈、命令、进度、死亡、系统行、INFO 兜底、`other` 判定。
 
-**为什么跳过控制台重复行**：宿主会把同一条聊天同时投影成 `chat:message` 与 `console:line`。控制台层丢弃这些行，避免同一条消息入库两次；跳过会计入 `status.skipped`，但不会入库。
+**为什么聊天要跨源去重**：在线模式下宿主会把同一条聊天同时投递为 `chat:message` 与 `console:line`；离线模式（`online-mode=false`）下宿主只留控制台行（带 `[Not Secure]`），结构化事件可能不来。因此控制台聊天行**不再直接丢弃**，而是按 `(发言人, 文本)` 与结构化事件做 3 秒跨源去重：两种投递顺序下都只保留一条，计入 `status.duplicates`。玩家自己连发两句相同内容不会被误判（同源不参与去重）。
 
-`console:line` 噪音很大（繁忙服务器每秒数百行）。插件必须静态订阅，运行期无法退订；需要压低噪音时用 `consoleForward=false`（仍采集入库，不转发）或 `forwardCategories` 只保留需要的类别。
+`console:line` 噪音很大（繁忙服务器每秒数百行）。插件必须静态订阅，运行期无法退订；因此**控制台行默认不转发**（`consoleForward=false`，仍采集入库），需要把服务器 `say`、日志同步到平台时再显式打开。`forwardCategories` 默认也只保留玩家聊天 `chat`。
 
 ## 配置
 
@@ -103,13 +121,14 @@ test/                       分类、存储、分发、桥、入站、QQ、配�
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
 | `platforms` | `["log"]` | 启用的适配器 id；空数组表示只采集 |
-| `forwardCategories` | 全部类别 | 转发到平台的类别；仍会采集入库 |
-| `consoleForward` | `true` | 为 `false` 时控制台消息不转发 |
+| `forwardCategories` | `["chat"]` | 转发到平台的类别；默认只转发玩家聊天。需要加入/离开、死亡、进度、系统行时再显式追加；仍会采集入库 |
+| `consoleForward` | `false` | 默认不转发控制台/日志行（`source=console`）；只采集入库。需要把服务器 `say`、日志同步到平台时再打开 |
 | `storeSize` | `200` | 环形缓存条数（10–5000） |
 | `queueCapacity` | `256` | 单平台出站与全局入站队列的积压上限（8–4096），超出丢最旧 |
 | `inbound` | `true` | 是否允许平台消息注入游戏；关闭后 QQ 仍可出站 |
 | `inboundServer` | 自动 | 入站默认服务器；省略时选运行中的服务器 |
 | `inboundMaxLength` | `200` | 单条入站文本上限（32–512），超长截断 |
+| `injectMode` | `"tellraw"` | 平台消息注入游戏的方式：`tellraw` 游戏里只有 `[QQ]` 标签但不写服务器日志；`say` 会写入 `logs/latest.log`，但游戏内多出 `[Server]` 前缀（原版只有 `say`/`me` 这类服务器广播会进日志） |
 | `log.prefix` | `"chat-bridge"` | 日志平台前缀 |
 | `log.level` | `"info"` | `info` / `debug` |
 | `qq.appId` | 无（必填） | QQ 开放平台机器人 AppID |
@@ -118,13 +137,15 @@ test/                       分类、存储、分发、桥、入站、QQ、配�
 | `qq.apiBase` | 按 sandbox 推导 | OpenAPI 基址，一般无需修改 |
 | `qq.tokenUrl` | 官方凭证地址 | `https://bots.qq.com/app/getAppAccessToken` |
 | `qq.intents` | `["group_and_c2c"]` | 事件订阅位；可选 `guilds` / `direct_message` / `interaction` 等 |
-| `qq.markdown` | `false` | 为 `true` 用 `msg_type=2` 发 Markdown；默认纯文本避免符号被渲染 |
+| `qq.markdown` | `false` | 为 `true` 用 `msg_type=2` 发 Markdown；默认纯文本避免符号被渲染。群/私聊镜像的图片始终优先用 Markdown 图文，与此开关无关 |
 | `qq.groups` | `[]` | 出站 `group_openid`；同时是入站白名单 |
 | `qq.privateUsers` | `[]` | 出站私聊 `user_openid`（官方 API 用 openid，不是 QQ 号） |
 | `qq.allowedUsers` | `[]` | 非空时只允许这些 openid 进入游戏 |
 | `qq.categories` | 沿用全局 | QQ 出站类别过滤 |
 | `qq.inbound` | `true` | 是否把 QQ 消息注入游戏 |
 | `qq.allowPrivate` | `false` | 是否接收私聊（默认关闭，避免陌生人打扰） |
+| `qq.syncChannels` | `true` | 群聊与私聊互相同步：群里收到的消息也会发到私聊目标，私聊收到的也会发到群目标；只影响 QQ 内部会话，不影响游戏注入；来源会话不重复发送 |
+| `qq.forwardMedia` | `true` | 群/私聊互转时用一条 Markdown 图文消息转发图片（文字在前、图片在后）；Markdown 失败退回标题文本 + 富媒体上传。QQ 表情统一转为 `[表情]` |
 | `qq.label` | `"QQ"` | 游戏内显示为 `[QQ] 昵称: 消息` |
 | `qq.server` | 全局 | 该适配器的入站默认服务器 |
 | `qq.maxLength` | `1500` | 单条出站上限，超出按此分片（官方上限约 4000） |
@@ -150,6 +171,8 @@ test/                       分类、存储、分发、桥、入站、QQ、配�
     "groups": ["GROUP_OPENID"],
     "allowedUsers": [],
     "allowPrivate": false,
+    "syncChannels": true,
+    "forwardMedia": true,
     "label": "QQ",
     "server": "survival"
   }
@@ -160,6 +183,18 @@ test/                       分类、存储、分发、桥、入站、QQ、配�
 `x-mcsup-secret: true`。宿主负责按插件隔离、加密持久化（`secrets.json`），
 管理端读取时返回 `***`，插件握手时收到明文才能工作；插件自身不落盘任何密钥，
 日志与 `status` 也不会输出 `clientSecret` 或 `access_token`。
+
+**写入顺序（实测）**：`mcsup plugin config set` 每次都会对**合并后的完整配置**做
+schema 校验，而 schema 的默认值里已经包含 `qq` 对象。`qq.appId` / `qq.clientSecret`
+是必填项，所以必须先写完整 `qq` 块，再写 `platforms` 等顶层键；顺序反了会得到
+`config.qq.appId: required field is missing`，且该次写入不会生效。
+
+```powershell
+# 先写 qq 整块（内部双引号写成 \"，见文首安装说明）
+mcsup plugin config set chat-bridge qq '{\"appId\":\"...\",\"clientSecret\":\"...\"}'
+# 再写其余顶层键
+mcsup plugin config set chat-bridge platforms '[\"qq\",\"log\"]'
+```
 
 **能力声明**：`events`、`console:read`、`console:write`、`server:read`。
 `console:write` 属高风险能力，必须由用户显式授予。未授予时插件仍会正常出站，
@@ -232,7 +267,7 @@ messages { "server": "survival", "limit": 20 }
 | --- | --- | --- |
 | 游戏 → QQ | `[玩家名]:消息` | 玩家聊天严格使用此格式，例如 `[Steve]:你好` |
 | 游戏 → QQ（非聊天） | `[加入] Alex: Alex 加入了游戏` | 用中文类别标签，避免歧义 |
-| QQ → 游戏 | `[QQ] 昵称: 消息` | 通过 `tellraw @a` 注入，可选 `qq.server` / `inboundServer` |
+| QQ → 游戏 | `[QQ] 昵称: 消息` | 通过 `injectMode` 注入（默认 `tellraw @a`，游戏内只有这一个标签）；可选 `qq.server` / `inboundServer` |
 
 出站只发送纯文本（或显式开启的 Markdown），不拼任何平台标记；入站会把 `<@openid>` 映射成昵称、去掉机器人自身的 @，附件转为 `[图片]` / `[语音] ASR` / `[文件: 名称]` 占位文本。
 
@@ -244,7 +279,9 @@ messages { "server": "survival", "limit": 20 }
 - **限流**：两次 OpenAPI 调用之间至少 `sendIntervalMs`；429/5xx 退避重试；`msg_id+msg_seq` 重复时换 seq 重发。
 - **去重**：入站按消息 id 记忆最近 1000 条，桥内核再按 `platform:id` 去重 10 分钟；重连后不会重复注入。
 - **过滤**：只接收 `qq.groups` 内的群与 `qq.privateUsers` 内的私聊；`allowedUsers` 可进一步收窄发言人；机器人自己的消息不会被回灌。
-- **注入安全**：`tellraw` JSON 组件转义，不用 `say`，并在桥内核按注入文本做 60 秒回声抑制，避免「游戏 → QQ → 游戏」自激。
+- **群/私聊互通**：`qq.syncChannels`（默认 `true`）把一条 QQ 消息再发到除来源会话之外的所有目标：群里发的进私聊、私聊发的进群。消息带 `[群]` / `[私聊]` 前缀，来源会话跳过所以不会重复；机器人自己发的消息不触发入站事件，不会回环。图片（`qq.forwardMedia=true`）用**一条 Markdown 图文消息**转发：`[群] 昵称: 文字 ![图片](url)`，文字在前、图片在后；Markdown 发送失败时退回「标题文本 + 富媒体上传」。纯表情消息会把贴纸并进同一条 Markdown，不再额外补一条 `[表情]`；无贴纸可转发时显示 `[表情]` 文本。
+- **注入安全**：`tellraw` 用 JSON 组件转义、`say` 用单行文本；两种方式都过滤控制字符，并在桥内核按注入文本做 60 秒回声抑制，避免「游戏 → QQ → 游戏」自激。注入成功时会在插件日志写一行 `[qq] 注入 <server>：[QQ] 昵称: 消息`，便于核对。
+- **注入方式与日志**：原版 Minecraft 只有 `say`/`me` 这类服务器广播会写进 `logs/latest.log`。因此「游戏内只有 `[QQ]` 标签」与「QQ 消息出现在服务器日志」不可兼得：默认 `injectMode="tellraw"` 保证单标签，但服务器日志里没有；改成 `injectMode="say"` 则日志可查，但游戏内会显示 `[Server] [QQ] ...`。
 
 ### 官方频控（不可绕过）
 
@@ -348,7 +385,7 @@ telegram: s.optional(
 - 连接、重连、限流、鉴权都由适配器自己负责；内核只提供 `AbortSignal` 与 `stop(reason)`。
 - **入站**：适配器收到外部消息后调用 `ctx.inbound({ platform, channel, author, text, messageId? })`；
   内核统一做去重、长度限制、排队、回声抑制，并通过 `ctx.game` 注入游戏。
-  适配器不需要知道服务器选择、`tellraw` 转义或队列细节。
+  适配器不需要知道服务器选择、注入命令或队列细节。
 - **降级**：`ctx.game` 在未授予 `console:write` 时为 `undefined`；适配器只负责上报消息，
   内核会记录失败计数，不要求适配器自己判断权限。
 - 平台 id 必须匹配 `^[a-z][a-z0-9-]{0,31}$`，且与 `create()` 返回实例的 `id` 一致。

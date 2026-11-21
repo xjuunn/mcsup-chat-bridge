@@ -80,7 +80,13 @@ describe("插件（MockHost 全链路）", () => {
   });
 
   it("事件 → 分类 → 入库 → 查询，配置热更新生效", async () => {
-    const host = createMockHost(plugin, { config: { platforms: ["null"] } });
+    const host = createMockHost(plugin, {
+      config: {
+        platforms: ["null"],
+        consoleForward: true,
+        forwardCategories: ["chat", "join", "warning"],
+      },
+    });
     await host.start();
 
     await host.emit("chat:message", {
@@ -108,7 +114,8 @@ describe("插件（MockHost 全链路）", () => {
     let status = unwrap<StatusView>(await host.callOp("status"));
     expect(status.started).toBe(true);
     expect(status.accepted).toBe(3);
-    expect(status.skipped).toBe(1);
+    expect(status.skipped).toBe(0);
+    expect(status.duplicates).toBe(1);
     expect(status.stored).toBe(3);
     expect(status.categories.chat).toBe(1);
     expect(status.categories.join).toBe(1);

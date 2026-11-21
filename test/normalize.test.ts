@@ -50,6 +50,44 @@ describe("事件归一化", () => {
     }
   });
 
+  it("真实信封：server 只在 meta 顶层、data 不带 server 时仍能归一化", () => {
+    // 宿主线格式：{"kind":"chat:message","server":"test1","at":...,
+    //              "data":{"from":"Steve","text":"你好","at":...}}
+    const result = normalizeEvent(
+      "chat:message",
+      { from: "Steve", text: "你好", at: AT },
+      meta("chat:message", "test1"),
+    );
+    expect(result.kind).toBe("message");
+    if (result.kind === "message") {
+      expect(result.draft.category).toBe("chat");
+      expect(result.draft.server).toBe("test1");
+      expect(result.draft.from).toBe("Steve");
+    }
+  });
+
+  it("真实信封：console:line 的 data 只有 line/at", () => {
+    const result = normalizeEvent(
+      "console:line",
+      { line: "[12:00:00] [Server thread/WARN]: slow", at: AT },
+      meta("console:line", "test1"),
+    );
+    expect(result.kind).toBe("message");
+    if (result.kind === "message") {
+      expect(result.draft.category).toBe("warning");
+      expect(result.draft.server).toBe("test1");
+    }
+  });
+
+  it("真实信封：player:joined 不带 at，时间回退到 meta", () => {
+    const result = normalizeEvent("player:joined", { player: "Alex" }, meta("player:joined", "test1"));
+    expect(result.kind).toBe("message");
+    if (result.kind === "message") {
+      expect(result.draft.server).toBe("test1");
+      expect(result.draft.at).toBe("2026-11-21T12:00:00.000Z");
+    }
+  });
+
   it("备份事件与未知事件被跳过", () => {
     expect(normalizeEvent("backup:completed", {}, meta("backup:completed")).kind).toBe("skip");
     expect(normalizeEvent("mystery", {}, meta("mystery")).kind).toBe("skip");

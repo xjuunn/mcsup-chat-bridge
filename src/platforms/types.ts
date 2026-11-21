@@ -58,6 +58,13 @@ export interface PlatformInboundMessage {
 }
 
 /**
+ * 注入游戏的方式：
+ * - `tellraw`：游戏内只显示插件自己的标签（如 `[QQ]`），不写服务器日志；
+ * - `say`：会写进服务器 `logs/latest.log`，但游戏内会多一个 `[Server]` 前缀。
+ */
+export type InjectMode = "tellraw" | "say";
+
+/**
  * 游戏侧端口。
  *
  * 内核不直接依赖 MCSUP 的能力客户端；入口层（`src/index.ts`）把
@@ -65,7 +72,7 @@ export interface PlatformInboundMessage {
  */
 export interface GamePort {
   /** 向指定服务器注入一条聊天消息（实现负责安全转义与广播） */
-  sendChat(server: string, text: string): Promise<void>;
+  sendChat(server: string, text: string, mode?: InjectMode): Promise<void>;
   /** 选择服务器：优先用 `preferred`，否则按运行状态挑一个；无可用时返回 null */
   resolveServer(preferred?: string): Promise<string | null>;
 }

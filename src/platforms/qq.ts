@@ -63,6 +63,10 @@ export interface QqSettings {
   readonly categories?: readonly MessageCategory[];
   readonly inbound: boolean;
   readonly allowPrivate: boolean;
+  /** 群聊与私聊互相同步（默认开启）；只影响 QQ 内部会话之间的转发 */
+  readonly syncChannels: boolean;
+  /** 群/私聊互转时是否把图片重新上传并转发（默认开启） */
+  readonly forwardMedia: boolean;
   readonly label: string;
   readonly server?: string;
   readonly maxLength: number;
@@ -101,7 +105,7 @@ const INTENT_NAMES = Object.keys(INTENT_BITS) as IntentName[];
 const DEFAULT_API_BASE = "https://api.sgroup.qq.com";
 const SANDBOX_API_BASE = "https://sandbox.api.sgroup.qq.com";
 const DEFAULT_TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken";
-const USER_AGENT = "mcsup-chat-bridge/0.1.0 (QQBotAdapter)";
+const USER_AGENT = "mcsup-chat-bridge/0.1.12 (QQBotAdapter)";
 
 /** 出站队列上限：分发层之外再兜一层，避免重连期间无限堆积 */
 const OUTBOUND_LIMIT = 512;
@@ -184,6 +188,8 @@ export function parseQqSettings(raw: unknown): QqSettings {
     ...(categories === undefined ? {} : { categories }),
     inbound: boolOf(record["inbound"], true),
     allowPrivate: boolOf(record["allowPrivate"], false),
+    syncChannels: boolOf(record["syncChannels"], true),
+    forwardMedia: boolOf(record["forwardMedia"], true),
     label: stringOf(record["label"]) ?? "QQ",
     ...(server === undefined ? {} : { server }),
     maxLength: intOf(record["maxLength"], 1_500, 64, 4_000),
@@ -318,7 +324,48 @@ export function qqInboundText(event: Record<string, unknown>): string {
     text = `${text} ${markers.join(" ")}`;
   }
 
+  // QQ 客户端的表情在 content 里是 `<faceType=1,faceId="13",ext="...">` 这类标签，
+  // 官方机器人无法原样渲染；转成占位，避免一大段标记出现在游戏聊天栏或镜像消息里。
+  text = text.replace(/<faceType=\d+,faceId="\d+"(?:,ext="[^"]*")?\s*\/?>/g, "[表情]");
+
   return text.replace(/\s+/g, " ").trim();
+}
+
+/** 提取入站消息里的图片 URL（用于群/私聊之间转发真实图片） */
+export function qqInboundImages(event: Record<string, unknown>): string[] {
+  const attachments = Array.isArray(event["attachments"]) ? event["attachments"] : [];
+  const urls: string[] = [];
+  for (const item of attachments) {
+    if (typeof item !== "object" || item === null) {
+      continue;
+    }
+    const attachment = item as Record<string, unknown>;
+    const type = stringOf(attachment["content_type"]) ?? "";
+    const url = stringOf(attachment["url"]);
+    if (type.startsWith("image/") && url !== undefined && url !== "") {
+      urls.push(url);
+    }
+  }
+  return urls;
+}
+
+/**
+ * 把文字里的 `[图片]` 占位换成 Markdown 图片，保证「文字在前、图片在后」且
+ * 仍是同一条消息。QQ 官方群聊/单聊已对全部机器人开放自定义 Markdown，
+ * 图片用公网 URL（入站附件的 QQ CDN 地址即可，平台会自行下载转存）。
+ */
+export function buildMediaMarkdown(text: string, images: readonly string[]): string {
+  let index = 0;
+  let out = text.replace(/\[图片\]/g, () => {
+    const url = images[index];
+    index += 1;
+    return url === undefined ? "[图片]" : `![图片](${url})`;
+  });
+  // 附件比占位多时（例如表情贴纸没有对应占位），补在末尾，避免丢图。
+  for (; index < images.length; index += 1) {
+    out += ` ![图片](${images[index]})`;
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +384,16 @@ interface PassiveEntry {
 }
 
 interface PendingSend {
-  readonly message: NormalizedMessage;
+  /** 用于日志的标识（游戏消息用消息 id，镜像消息用 `mirror:...`） */
+  readonly id: string;
+  /** 已经格式化好的出站文本 */
+  readonly text: string;
+  /** 需要跳过的目标（`kind:id`），用于群/私聊镜像时不回发来源会话 */
+  readonly exclude?: string;
+  /** 需要随消息一起转发的图片 URL（Markdown 失败时退回富媒体上传） */
+  readonly media?: readonly string[];
+  /** 已拼好的 Markdown 图文消息（文字在前、图片在后，作为单条消息发送） */
+  readonly markdown?: string;
 }
 
 class QqApiError extends Error {
@@ -382,6 +438,8 @@ export class QqPlatform implements ChatPlatform {
   private readonly seen = new Map<string, number>();
   private readonly passive = new Map<string, PassiveEntry>();
   private readonly seqs = new Map<string, number>();
+  /** 被过滤丢弃的会话只告警一次，避免刷屏；键为 `kind:id` */
+  private readonly warnedDrops = new Set<string>();
 
   public constructor(options: PlatformCreateOptions) {
     this.log = options.log;
@@ -409,14 +467,20 @@ export class QqPlatform implements ChatPlatform {
     if (this.settings.categories !== undefined && !this.settings.categories.includes(message.category)) {
       return;
     }
-    if (formatOutbound(message) === "") {
+    const text = formatOutbound(message);
+    if (text === "") {
       return;
     }
+    this.enqueue({ id: message.id, text });
+  }
+
+  /** 入队一条已格式化的出站消息；超限时丢最旧，避免重连期间无限堆积 */
+  private enqueue(pending: PendingSend): void {
     if (this.outQueue.length >= OUTBOUND_LIMIT) {
       this.outQueue.shift();
       this.log.warn(`[qq] 出站积压超过 ${OUTBOUND_LIMIT} 条，丢弃最旧消息`);
     }
-    this.outQueue.push({ message });
+    this.outQueue.push(pending);
     void this.flushOutbound();
   }
 
@@ -672,6 +736,23 @@ export class QqPlatform implements ChatPlatform {
         this.onMessage(type, event);
         return;
       }
+      case "GROUP_ADD_ROBOT":
+      case "GROUP_DEL_ROBOT": {
+        // 入群/退群事件是拿到 group_openid 的唯一可靠来源（群号无法换算）
+        const groupId = stringOf(event["group_openid"]);
+        if (groupId === undefined) {
+          this.log.info(`[qq] ${type}（未带 group_openid）`);
+          return;
+        }
+        if (type === "GROUP_ADD_ROBOT") {
+          this.log.info(
+            `[qq] 机器人已加入群：group_openid=${groupId}；把它填进 qq.groups 才能在该群收发`,
+          );
+        } else {
+          this.log.info(`[qq] 机器人已被移出群：group_openid=${groupId}`);
+        }
+        return;
+      }
       default:
         this.log.debug?.(`[qq] 忽略事件 ${type}`);
     }
@@ -850,17 +931,26 @@ export class QqPlatform implements ChatPlatform {
     }
 
     if (this.settings.allowedUsers.length > 0 && !this.settings.allowedUsers.includes(authorId)) {
+      this.warnDropped(isGroup, channelId, authorId, "发言人不在 allowedUsers 白名单");
       return;
     }
     if (isGroup) {
       if (this.settings.groups.length > 0 && !this.settings.groups.includes(channelId)) {
+        this.warnDropped(isGroup, channelId, authorId, "群不在 qq.groups 白名单");
         return;
       }
     } else {
       if (!this.settings.allowPrivate) {
+        this.warnDropped(
+          isGroup,
+          channelId,
+          authorId,
+          "私聊未启用（qq.allowPrivate=false）；如需接收，把该 user_openid 填进 qq.privateUsers 并设 allowPrivate=true",
+        );
         return;
       }
       if (this.settings.privateUsers.length > 0 && !this.settings.privateUsers.includes(channelId)) {
+        this.warnDropped(isGroup, channelId, authorId, "私聊对象不在 qq.privateUsers 白名单");
         return;
       }
     }
@@ -870,6 +960,18 @@ export class QqPlatform implements ChatPlatform {
       stringOf(author["username"]) ??
       stringOf(author["nickname"]) ??
       authorId;
+
+    // 首次见到某个会话时打一条 info，OpenID 只能从事件里拿到，用户据此填写
+    // qq.groups / qq.privateUsers；同一会话只打一次，不刷屏。
+    const channelKey = `${isGroup ? "group" : "private"}:${channelId}`;
+    if (!this.warnedDrops.has(`seen:${channelKey}`)) {
+      this.warnedDrops.add(`seen:${channelKey}`);
+      this.log.info(
+        isGroup
+          ? `[qq] 收到群消息：group_openid=${channelId}，作者=${displayName}（member_openid=${authorId}）`
+          : `[qq] 收到私聊消息：user_openid=${channelId}，作者=${displayName}`,
+      );
+    }
 
     const passiveKey = targetKey(isGroup ? "group" : "private", channelId);
     if (messageId !== undefined) {
@@ -891,6 +993,60 @@ export class QqPlatform implements ChatPlatform {
       ...(this.settings.server === undefined ? {} : { server: this.settings.server }),
     };
     ctx.inbound(inbound);
+
+    // 图片转发：优先用 Markdown 单条消息（文字在前、图片在后）。
+    // 只有纯表情消息（正文只有 face 标签）时，贴纸图片就是那个表情：
+    // 不保留 `[表情]` 占位，让表情图片直接跟在昵称后面。
+    const images = this.settings.forwardMedia ? qqInboundImages(event) : [];
+    const rawContent = stringOf(event["content"]) ?? "";
+    const faceOnly =
+      images.length > 0 &&
+      /<faceType=\d+,faceId="\d+"/.test(rawContent) &&
+      rawContent
+        .replace(/<faceType=\d+,faceId="\d+"(?:,ext="[^"]*")?\s*\/?>/g, "")
+        .replace(/<@!?[^>]+>/g, "")
+        .trim() === "";
+    this.mirrorToOtherChannels(isGroup, channelId, displayName, text, images, faceOnly);
+  }
+
+  /**
+   * 群聊与私聊互相同步（qq.syncChannels，默认开启）。
+   *
+   * 收到 QQ 消息后，把它再发到「除来源会话之外」的其它会话：群里发的进私聊，
+   * 私聊发的进群。跳过来源会话是为了避免把消息原样回发到发源地（造成重复），
+   * 机器人自己发的消息不会再触发入站事件，因此不会形成回环。
+   *
+   * 带图片时发一条 Markdown 图文消息：`[群] 昵称: 文字 ![图片](url)`，
+   * 文字在前、图片在后，仍是同一条消息。Markdown 失败时退回「文本 + 富媒体上传」。
+   */
+  private mirrorToOtherChannels(
+    isGroup: boolean,
+    channelId: string,
+    displayName: string,
+    text: string,
+    images: readonly string[],
+    faceOnly: boolean,
+  ): void {
+    if (!this.settings.syncChannels || this.stopping || text === "") {
+      return;
+    }
+    const exclude = targetKey(isGroup ? "group" : "private", channelId);
+    const hasOtherTarget = this.targets().some(
+      (target) => targetKey(target.kind, target.id) !== exclude,
+    );
+    if (!hasOtherTarget) {
+      return;
+    }
+    const shownText = faceOnly ? text.replace(/\[表情\]\s*/g, "").trim() : text;
+    const caption = `[${isGroup ? "群" : "私聊"}] ${displayName}: ${shownText}`;
+    this.enqueue({
+      id: `mirror:${exclude}`,
+      text: caption,
+      exclude,
+      ...(images.length === 0
+        ? {}
+        : { media: images, markdown: buildMediaMarkdown(caption, images) }),
+    });
   }
 
   private rememberSeen(messageId: string): void {
@@ -918,6 +1074,30 @@ export class QqPlatform implements ChatPlatform {
   // 出站
   // -------------------------------------------------------------------------
 
+  /**
+   * 入站被过滤时告警一次（每个会话独立），并带上 OpenID。
+   *
+   * OpenID 无法从 QQ 号推导，只能从事件里取；配置阶段如果静默丢弃，用户
+   * 既不知道被过滤，也拿不到填配置所需的值。
+   */
+  private warnDropped(
+    isGroup: boolean,
+    channelId: string,
+    authorId: string,
+    reason: string,
+  ): void {
+    const key = `${isGroup ? "group" : "private"}:${channelId}`;
+    if (this.warnedDrops.has(key)) {
+      return;
+    }
+    this.warnedDrops.add(key);
+    this.log.warn(
+      isGroup
+        ? `[qq] 丢弃群消息（${reason}）：group_openid=${channelId}，作者 member_openid=${authorId}`
+        : `[qq] 丢弃私聊消息（${reason}）：user_openid=${channelId}，作者=${authorId}`,
+    );
+  }
+
   private targets(): readonly OutboundTarget[] {
     const targets: OutboundTarget[] = [];
     for (const group of this.settings.groups) {
@@ -940,13 +1120,15 @@ export class QqPlatform implements ChatPlatform {
         if (pending === undefined) {
           continue;
         }
-        const text = formatOutbound(pending.message);
+        const text = pending.text;
         if (text === "") {
           continue;
         }
-        const targets = this.targets();
+        const targets = this.targets().filter(
+          (target) => pending.exclude !== targetKey(target.kind, target.id),
+        );
         if (targets.length === 0) {
-          if (!this.warnedNoTarget) {
+          if (this.settings.groups.length + this.settings.privateUsers.length === 0 && !this.warnedNoTarget) {
             this.warnedNoTarget = true;
             this.log.warn("[qq] 未配置 groups / privateUsers，出站消息将被丢弃");
           }
@@ -956,17 +1138,17 @@ export class QqPlatform implements ChatPlatform {
         let failures = 0;
         for (const target of targets) {
           try {
-            await this.sendToTarget(target, text);
+            await this.sendToTarget(target, text, pending.media, pending.markdown);
           } catch (error) {
             failures += 1;
             this.log.warn(`[qq] 发送到 ${target.kind}:${target.id} 失败：${errorText(error)}`);
           }
         }
         if (failures === targets.length) {
-          throw new Error(`QQ 所有目标均发送失败（${pending.message.id}）`);
+          throw new Error(`QQ 所有目标均发送失败（${pending.id}）`);
         }
         if (failures > 0) {
-          this.log.warn(`[qq] 消息 ${pending.message.id} 有 ${failures}/${targets.length} 个目标失败`);
+          this.log.warn(`[qq] 消息 ${pending.id} 有 ${failures}/${targets.length} 个目标失败`);
         }
       }
     } finally {
@@ -974,32 +1156,142 @@ export class QqPlatform implements ChatPlatform {
     }
   }
 
-  private async sendToTarget(target: OutboundTarget, text: string): Promise<void> {
+  private async sendToTarget(
+    target: OutboundTarget,
+    text: string,
+    media?: readonly string[],
+    markdown?: string,
+  ): Promise<void> {
+    const key = targetKey(target.kind, target.id);
+    // 图文优先走单条 Markdown：`[群] 昵称: 文字 ![图片](url)`，文字在前、图片在后。
+    if (markdown !== undefined) {
+      try {
+        await this.sendChunk(target, markdown, { markdown: true });
+        return;
+      } catch (error) {
+        this.log.warn(
+          `[qq] ${key} Markdown 图文发送失败，退回文本 + 富媒体：${errorText(error)}`,
+        );
+      }
+    }
+    if (media !== undefined && media.length > 0) {
+      const sent = await this.sendImages(target, text, media);
+      if (sent > 0) {
+        return;
+      }
+      // 图片全部上传失败：退回纯文本，保留 `[图片]` 占位，至少让文字送达。
+      this.log.warn(`[qq] ${key} 图片全部转发失败，退回纯文本`);
+    }
     const chunks = splitText(text, this.settings.maxLength);
     for (const chunk of chunks) {
       await this.sendChunk(target, chunk);
     }
   }
 
-  private async sendChunk(target: OutboundTarget, text: string): Promise<void> {
+  /**
+   * Markdown 图文发送失败时的兜底：把图片重新上传到目标会话，再以富媒体消息
+   * （`msg_type=7`）发出。官方不提供跨会话复用 `file_info` 的接口，必须先
+   * `/files` 上传目标会话自己的 `file_info`；因此这里逐张上传。返回成功发出的
+   * 张数，0 表示全部失败。
+   *
+   * 顺序：QQ 客户端会把富媒体消息的 `content` 渲染在图片之后，所以把
+   * `[私聊] 昵称: ...` 先作为普通文本发出，再逐张发图片，保证标签在前、图片在后。
+   */
+  private async sendImages(
+    target: OutboundTarget,
+    text: string,
+    media: readonly string[],
+  ): Promise<number> {
+    const key = targetKey(target.kind, target.id);
+    // 正文里不再保留 `[图片]` 占位（真实图片马上会跟一条）；若正文只有图片，
+    // 保留 `[私聊] 昵称:` 这个前缀作为图片的标题行。
+    const cleaned = text.replace(/\[图片\]\s*/g, "").trim();
+    const caption = cleaned === "" ? "" : (splitText(cleaned, this.settings.maxLength)[0] ?? "");
+
+    // 先全部上传：只要有任意一张成功，就先发标题再发图片；全部失败则退回纯文本。
+    const uploaded: string[] = [];
+    for (const url of media) {
+      try {
+        uploaded.push(await this.uploadMedia(target, url));
+      } catch (error) {
+        this.log.warn(`[qq] 图片上传到 ${key} 失败：${errorText(error)}`);
+      }
+    }
+    if (uploaded.length === 0) {
+      return 0;
+    }
+
+    if (caption !== "") {
+      await this.sendChunk(target, caption);
+    }
+    for (const fileInfo of uploaded) {
+      await this.sendChunk(target, "", { fileInfo });
+    }
+    this.log.debug?.(`[qq] 已转发 ${uploaded.length}/${media.length} 张图片到 ${key}`);
+    return uploaded.length;
+  }
+
+  /** 上传图片素材，返回目标会话可用的 `file_info` */
+  private async uploadMedia(target: OutboundTarget, url: string): Promise<string> {
+    const path =
+      target.kind === "group"
+        ? `/v2/groups/${encodeURIComponent(target.id)}/files`
+        : `/v2/users/${encodeURIComponent(target.id)}/files`;
+    await this.pace();
+    const result = await this.apiRequest("POST", path, {
+      file_type: 1, // 1=图片；官方富媒体文件类型
+      url,
+      srv_send_msg: false, // 只上传，不直接发送
+    });
+    const fileInfo = stringOf(result["file_info"]);
+    if (fileInfo === undefined) {
+      throw new Error("上传接口未返回 file_info");
+    }
+    return fileInfo;
+  }
+
+  private async sendChunk(
+    target: OutboundTarget,
+    text: string,
+    options: { fileInfo?: string; markdown?: boolean } = {},
+  ): Promise<void> {
     const key = targetKey(target.kind, target.id);
     const path =
       target.kind === "group"
         ? `/v2/groups/${encodeURIComponent(target.id)}/messages`
         : `/v2/users/${encodeURIComponent(target.id)}/messages`;
+    const { fileInfo } = options;
+    const useMarkdown = options.markdown ?? this.settings.markdown;
 
     for (let attempt = 1; attempt <= SEND_ATTEMPTS; attempt += 1) {
       await this.pace();
       const passive = this.takePassive(key);
+      const payload: Record<string, unknown> =
+        fileInfo !== undefined
+          ? {
+              msg_type: 7,
+              media: { file_info: fileInfo },
+              ...(text === "" ? {} : { content: text }),
+            }
+          : useMarkdown
+            ? { msg_type: 2, markdown: { content: text } }
+            : { msg_type: 0, content: text };
       const body: Record<string, unknown> = {
         msg_seq: this.nextSeq(key),
-        ...(this.settings.markdown
-          ? { msg_type: 2, markdown: { content: text } }
-          : { msg_type: 0, content: text }),
+        ...payload,
         ...(passive === undefined ? {} : { msg_id: passive.messageId }),
       };
       try {
         await this.apiRequest("POST", path, body);
+        const summary =
+          fileInfo !== undefined
+            ? `[图片] ${text.slice(0, 60)}`
+            : useMarkdown
+              ? `[图文] ${text.slice(0, 60)}`
+              : text.slice(0, 60);
+        this.log.debug?.(
+          `[qq] 已发送到 ${key}${passive === undefined ? "（主动消息）" : "（被动回复）"}：${summary}`,
+        );
         return;
       } catch (error) {
         if (!(error instanceof QqApiError)) {

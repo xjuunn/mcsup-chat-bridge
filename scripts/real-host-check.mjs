@@ -311,6 +311,21 @@ try {
       revision: 1,
       values: {
         platforms: ["log", "null", "qq"],
+        // 控制台转发默认关闭；这份假宿主配置显式打开，用来验证 console:line 的转发链路
+        consoleForward: true,
+        // 默认只转发 chat；这里显式放开全部类别，覆盖分类 → 转发的完整链路
+        forwardCategories: [
+          "chat",
+          "command",
+          "join",
+          "leave",
+          "system",
+          "warning",
+          "error",
+          "death",
+          "advancement",
+          "other",
+        ],
         qq: {
           appId: qqAppId,
           clientSecret: qqSecret,
@@ -343,49 +358,42 @@ try {
   };
 
   emit(1, "chat:message", {
-    server: "survival",
     from: "Steve",
     text: "\u00a7a有人吗",
     at: at(1),
+    at: at(1),
   });
-  emit(2, "chat:message", { server: "survival", from: "Steve", text: "/help", at: at(2) });
+  emit(2, "chat:message", { from: "Steve", text: "/help", at: at(2) });
   emit(3, "player:joined", { player: "Alex" });
   // 与事件 1 同一行的控制台投影：应被跳过，避免重复
   emit(4, "console:line", {
-    server: "survival",
     line: "[12:00:04] [Server thread/INFO]: <Steve> \u00a7a有人吗",
     at: at(4),
   });
   emit(5, "console:line", {
-    server: "survival",
     line: "[12:00:05] [Server thread/WARN]: Can't keep up! Is the server overloaded?",
     at: at(5),
   });
   emit(6, "console:line", {
-    server: "survival",
     line: "[12:00:06] [Server thread/ERROR]: Failed to load chunk",
     at: at(6),
   });
   emit(7, "console:line", {
-    server: "survival",
     line: "[12:00:07] [Server thread/INFO]: Saving the game",
     at: at(7),
   });
   emit(8, "server:started", { name: "survival" });
   // 与事件 10 同一行的控制台投影：应被跳过
   emit(9, "console:line", {
-    server: "survival",
     line: "[12:00:09] [Server thread/INFO]: Alex left the game",
     at: at(9),
   });
   emit(10, "player:left", { player: "Alex" });
   emit(11, "console:line", {
-    server: "survival",
     line: "[12:00:11] [Server thread/INFO]: Alex was slain by Zombie",
     at: at(11),
   });
   emit(12, "console:line", {
-    server: "survival",
     line: "[12:00:12] [Server thread/INFO]: Steve has made the advancement [Stone Age]",
     at: at(12),
   });
@@ -458,7 +466,8 @@ try {
   }
   assert(status.started === true, "status.started 应为 true");
   assert(status.accepted === 12, `status.accepted 应为 12，实际 ${status.accepted}`);
-  assert(status.skipped === 2, `status.skipped 应为 2，实际 ${status.skipped}`);
+  assert(status.skipped === 1, `status.skipped 应为 1，实际 ${status.skipped}`);
+  assert(status.duplicates === 1, `status.duplicates 应为 1，实际 ${status.duplicates}`);
   assert(status.stored === 12, `status.stored 应为 12，实际 ${status.stored}`);
   assert(
     status.categories.chat === 1 && status.categories.system === 4,
@@ -613,7 +622,6 @@ try {
   const configResult = await resultOf(configId);
   assert(configResult.revision === 2, "config 回执 revision 不符");
   emit(15, "console:line", {
-    server: "survival",
     line: "[12:00:15] [Server thread/WARN]: 这条只入库不转发",
     at: at(15),
   });
@@ -631,7 +639,6 @@ try {
   // ---- 被动回复：出站带上最近入站 msg_id --------------------------------
   const beforePassive = qqPosts.length;
   emit(16, "chat:message", {
-    server: "survival",
     from: "Steve",
     text: "被动回复测试",
     at: at(16),

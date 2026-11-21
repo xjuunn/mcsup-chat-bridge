@@ -41,13 +41,47 @@ describe("聊天分类", () => {
 });
 
 describe("控制台分类", () => {
-  it("跳过与结构化聊天重复的行", () => {
+  it("控制台聊天行（离线模式的 [Not Secure]）也产出聊天消息，并标记为投影", () => {
     const result = classifyConsoleLine({
       server: "survival",
       line: "[12:00:00] [Server thread/INFO]: <Steve> \u00a7a有人吗",
       at: AT,
     });
-    expect(result).toEqual({ kind: "skip", reason: "structured:chat" });
+    expect(result).toMatchObject({
+      kind: "message",
+      projection: true,
+      draft: {
+        category: "chat",
+        source: "chat",
+        from: "Steve",
+        text: "有人吗",
+        rule: "chat.message",
+      },
+    });
+
+    const offline = classifyConsoleLine({
+      server: "survival",
+      line: "[20:15:04] [Server thread/INFO]: [Not Secure] <Junhsiun> test",
+      at: AT,
+    });
+    expect(offline).toMatchObject({
+      kind: "message",
+      projection: true,
+      draft: { category: "chat", from: "Junhsiun", text: "test" },
+    });
+  });
+
+  it("以 / 开头的控制台聊天行归为命令", () => {
+    const result = classifyConsoleLine({
+      server: "survival",
+      line: "[12:00:00] [Server thread/INFO]: <Steve> /help",
+      at: AT,
+    });
+    expect(result).toMatchObject({
+      kind: "message",
+      projection: true,
+      draft: { category: "command", from: "Steve", text: "/help" },
+    });
   });
 
   it("跳过玩家加入 / 离开行", () => {

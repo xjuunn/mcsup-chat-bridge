@@ -18,7 +18,7 @@ import { configSchema, resolveConfig } from "./config.js";
 import { ChatBridge } from "./core/bridge.js";
 import { createQueries } from "./ops/index.js";
 import { createRegistry } from "./platforms/index.js";
-import type { GamePort } from "./platforms/types.js";
+import type { GamePort, InjectMode } from "./platforms/types.js";
 
 /** 订阅事件：结构化聊天 + 玩家 + 原始控制台 + 服务器生命周期 */
 export const SUBSCRIPTIONS = [
@@ -58,8 +58,13 @@ function bridgeOf(ctx: object): ChatBridge {
 /**
  * 把宿主能力适配成 `GamePort`。
  *
- * 注入使用 `tellraw @a <JSON 文本组件>` 而不是 `say`：`say` 会以服务器口吻
- * 回显到控制台，容易被桥再次采集，形成自激；`tellraw` 只面向玩家。
+ * 注入方式由 `injectMode` 决定：
+ * - `tellraw @a <JSON 文本组件>`：游戏里只显示插件自己的标签（如 `[QQ]`），
+ *   不会像 `say` 那样多出 `[Server]` 前缀；原版不会把它写进服务器日志。
+ * - `say <文本>`：会写进服务器 `logs/latest.log`（`[Not Secure] [Server] ...`），
+ *   且没有玩家在线时也能记录；代价是游戏内会多一个 `[Server]` 前缀。
+ *
+ * 两者都会做控制字符清理，避免消息里的换行/制表符破坏命令行。
  */
 function createGamePort(ctx: object, log: LogClient): GamePort | undefined {
   const caps = ctx as RuntimeCapabilities;
@@ -71,12 +76,14 @@ function createGamePort(ctx: object, log: LogClient): GamePort | undefined {
   const servers = caps["server:read"]?.servers;
 
   return {
-    async sendChat(server: string, text: string): Promise<void> {
+    async sendChat(server: string, text: string, mode: InjectMode = "tellraw"): Promise<void> {
       const clean = text.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
       if (clean === "") {
         return;
       }
-      await writer.sendLine(server, `tellraw @a ${JSON.stringify({ text: clean })}`);
+      const line =
+        mode === "say" ? `say ${clean}` : `tellraw @a ${JSON.stringify({ text: clean })}`;
+      await writer.sendLine(server, line);
     },
     async resolveServer(preferred?: string): Promise<string | null> {
       if (preferred !== undefined && preferred !== "") {
@@ -99,7 +106,7 @@ function createGamePort(ctx: object, log: LogClient): GamePort | undefined {
 export const plugin = definePlugin({
   id: "chat-bridge",
   title: "聊天桥",
-  version: "0.1.0",
+  version: "0.1.12",
   license: "MIT",
   description: "采集 Minecraft 聊天与控制台消息，按可插拔平台分发，并支持平台消息回流游戏",
   resident: true,

@@ -17,6 +17,7 @@ import type { PlatformRegistry } from "../platforms/registry.js";
 import type {
   ChatPlatform,
   GamePort,
+  InjectMode,
   PlatformInboundMessage,
 } from "../platforms/types.js";
 import { PlatformDispatcher, type PlatformStats } from "./dispatcher.js";
@@ -36,6 +37,12 @@ export interface BridgeConfig {
   readonly inboundServer?: string;
   /** 单条入站文本上限 */
   readonly inboundMaxLength: number;
+  /**
+   * 平台消息注入游戏的方式：
+   * - `tellraw`（默认）：游戏内只有插件标签，不写服务器日志；
+   * - `say`：写进服务器 `logs/latest.log`，但游戏内会多出 `[Server]` 前缀。
+   */
+  readonly injectMode: InjectMode;
   /** 与平台 id 同名的配置片段 */
   readonly platformSettings: Readonly<Record<string, unknown>>;
 }
@@ -92,6 +99,12 @@ const ECHO_TTL_MS = 60_000;
 const ECHO_WINDOW = 64;
 const SEEN_IDS = 1_024;
 const SEEN_TTL_MS = 10 * 60_000;
+/**
+ * 同一条玩家聊天可能被宿主投递两次：结构化 `chat:message` 与控制台投影
+ * `[Not Secure] <name> text`（离线模式只有后者）。跨源去重窗口取值只覆盖
+ * 两者到达的时间差，避免把玩家自己连发同样的两句话误判成重复。
+ */
+const CHAT_MIRROR_TTL_MS = 3_000;
 
 export class ChatBridge {
   private readonly log: LogClient;
@@ -121,6 +134,9 @@ export class ChatBridge {
   };
   private readonly inboundSeen = new Map<string, number>();
   private readonly echoWindow: Array<{ readonly text: string; readonly at: number }> = [];
+  /** 结构化聊天与控制台投影的跨源去重表：`from\u0000text` → 时间戳 */
+  private readonly structuredChat = new Map<string, number>();
+  private readonly projectedChat = new Map<string, number>();
 
   public constructor(options: BridgeOptions) {
     this.log = options.log;
@@ -218,6 +234,10 @@ export class ChatBridge {
       }
       if (this.isEcho(result.draft)) {
         this.suppressed += 1;
+        return;
+      }
+      if (this.isChatMirror(result.draft, result.projection === true)) {
+        this.duplicates += 1;
         return;
       }
       this.lastServer = result.draft.server;
@@ -368,9 +388,12 @@ export class ChatBridge {
       if (server === null) {
         throw new Error("没有可用的服务器（可在 inboundServer 中指定）");
       }
-      await port.sendChat(server, line);
+      await port.sendChat(server, line, this.config.injectMode);
       this.rememberEcho(line);
       this.inboundStats.delivered += 1;
+      // 注入本身不产生可查询的记录（tellraw 只面向玩家），这里显式留一条日志，
+      // 便于 `mcsup plugin logs chat-bridge` 核对「QQ → 游戏」是否真的发生。
+      this.log.info(`[${job.platform}] 注入 ${server}：${line}`);
     } catch (error) {
       this.inboundStats.failed += 1;
       this.log.warn(`[${job.platform}] 入站注入失败：${errorText(error)}`);
@@ -419,6 +442,36 @@ export class ChatBridge {
     if (this.echoWindow.length > ECHO_WINDOW) {
       this.echoWindow.shift();
     }
+  }
+
+  /**
+   * 跨源去重：`chat:message` 与控制台聊天投影是同一条消息的两种投递。
+   *
+   * 只看相反来源在 `CHAT_MIRROR_TTL_MS` 内是否出现过同样的 (from, text)：
+   * 同源重复（玩家真连发两句一样的话）不会被误判。
+   */
+  private isChatMirror(draft: MessageDraft, projection: boolean): boolean {
+    if (draft.category !== "chat" && draft.category !== "command") {
+      return false;
+    }
+    if (draft.from === null) {
+      return false;
+    }
+    const key = `${draft.from}\u0000${draft.text}`;
+    const now = Date.now();
+    const thatSide = projection ? this.structuredChat : this.projectedChat;
+    const thisSide = projection ? this.projectedChat : this.structuredChat;
+
+    for (const [seenKey, seenAt] of thatSide) {
+      if (now - seenAt > CHAT_MIRROR_TTL_MS) {
+        thatSide.delete(seenKey);
+      }
+    }
+    if ((thatSide.get(key) ?? 0) > 0) {
+      return true;
+    }
+    thisSide.set(key, now);
+    return false;
   }
 
   private pruneEcho(now: number): void {

@@ -35,9 +35,20 @@ Junction。宿主把产物内的任何符号链接视为不可信，会直接拒
 
 ```powershell
 npm run stage        # 生成自包含产物 artifact/（真实目录依赖，无符号链接）
-mcsup plugin install --from .\artifact --yes
 mcsup plugin verify .\artifact   # 可选：安装前让宿主校验一次
+mcsup plugin install --from .\artifact
 ```
+
+安装会一次走完整个向导，装完即用：
+
+1. 列出插件申请的权限（`events` / `console:read` / `console:write` / `server:read`），
+   问一次 `授予以上权限？[Y/n]`，默认授予；
+2. 按插件 `setup` 声明逐项询问必填配置（AppID、ClientSecret 遮蔽输入、
+   平台、注入方式、群/私聊 openid 等），留空的可选项直接跳过；
+3. 写配置后自动启用并启动，成功后直接显示「已安装并启动」。
+
+脚本或 CI 用 `--yes` 视为同意能力授权；`--no-setup` 跳过整个向导，
+回到旧行为（装完需手动 `grant` / `config set` / `enable` / `start`）。
 
 `scripts/stage-artifact.mjs` 会复制 `build/`，只把 SDK 的 `dist` + `package.json`
 和 `ws`、`zod` 以真实目录放进 `artifact/node_modules/`，然后断言产物内没有符号
@@ -186,10 +197,13 @@ test/                       分类、存储、分发、桥、入站、QQ、配�
 管理端读取时返回 `***`，插件握手时收到明文才能工作；插件自身不落盘任何密钥，
 日志与 `status` 也不会输出 `clientSecret` 或 `access_token`。
 
-**写入顺序（实测）**：`mcsup plugin config set` 每次都会对**合并后的完整配置**做
+**写入顺序（手工配置时）**：`mcsup plugin config set` 每次都会对**合并后的完整配置**做
 schema 校验，而 schema 的默认值里已经包含 `qq` 对象。`qq.appId` / `qq.clientSecret`
 是必填项，所以必须先写完整 `qq` 块，再写 `platforms` 等顶层键；顺序反了会得到
 `config.qq.appId: required field is missing`，且该次写入不会生效。
+
+安装向导不走这条路径：它用深度合并按字段写入，只改目标键，不会覆盖 `qq` 的
+其它值，也不会把打码后的 `***` 写回。下面的手工写法只用于装完之后补改：
 
 ```powershell
 # 先写 qq 整块（内部双引号写成 \"，见文首安装说明）
@@ -199,8 +213,10 @@ mcsup plugin config set chat-bridge platforms '[\"qq\",\"log\"]'
 ```
 
 **能力声明**：`events`、`console:read`、`console:write`、`server:read`。
-`console:write` 属高风险能力，必须由用户显式授予。未授予时插件仍会正常出站，
-但 QQ → 游戏方向降级为仅计数并在日志与 `status.inbound.failed` 中体现，不会假装成功。
+`console:write` 属高风险能力，安装向导会把它列进授权清单，由用户一次确认
+（`--yes` 视为同意）；`--no-setup` 时仍需显式 `mcsup plugin grant chat-bridge console:write`。
+未授予时插件仍会正常出站，但 QQ → 游戏方向降级为仅计数并在日志与
+`status.inbound.failed` 中体现，不会假装成功。
 
 配置热更新的语义：
 

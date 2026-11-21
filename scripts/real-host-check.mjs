@@ -628,6 +628,31 @@ try {
   );
   successCases.push("配置热更新只影响转发，不影响采集，三平台一致");
 
+  // ---- 被动回复：出站带上最近入站 msg_id --------------------------------
+  const beforePassive = qqPosts.length;
+  emit(16, "chat:message", {
+    server: "survival",
+    from: "Steve",
+    text: "被动回复测试",
+    at: at(16),
+  });
+  const passiveDeadline = Date.now() + 5_000;
+  while (qqPosts.length === beforePassive && Date.now() < passiveDeadline) {
+    await delay(20);
+  }
+  assert(qqPosts.length > beforePassive, "被动回复消息未发出");
+  const passivePost = qqPosts[qqPosts.length - 1];
+  assert(
+    passivePost.body?.msg_id === "91001",
+    `被动回复应带最近入站 msg_id，实际 ${JSON.stringify(passivePost.body?.msg_id)}`,
+  );
+  assert(
+    typeof passivePost.body?.content === "string" &&
+      passivePost.body.content.includes("[Steve]:被动回复测试"),
+    `被动回复内容不符：${JSON.stringify(passivePost.body?.content)}`,
+  );
+  successCases.push("出站优先使用最近入站 msg_id 做被动回复");
+
   // ---- 心跳与平台适配器实际输出 ----------------------------------------
   send({ type: "ping", n: 7 });
   const pong = await waitFor((f) => f.type === "pong" && f.n === 7, "pong 7");

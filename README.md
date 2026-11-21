@@ -43,8 +43,11 @@ mcsup plugin install --from .\artifact
 
 1. 列出插件申请的权限（`events` / `console:read` / `console:write` / `server:read`），
    问一次 `授予以上权限？[Y/n]`，默认授予；
-2. 按插件 `setup` 声明逐项询问必填配置（AppID、ClientSecret 遮蔽输入、
-   平台、注入方式、群/私聊 openid 等），留空的可选项直接跳过；
+2. 按插件 `setup` 声明逐项询问配置：
+   - `启用的平台` 是多选框：`■`/`□` 表示是否选中，空格切换、回车确认；
+   - `游戏内注入方式` 是单选项；
+   - `AppID`、`ClientSecret` 等输入框**不会预填旧值**，已有值时帮助行提示
+     「已设置；留空保持不变」，直接回车即沿用；
 3. 写配置后自动启用并启动，成功后直接显示「已安装并启动」。
 
 脚本或 CI 用 `--yes` 视为同意能力授权；`--no-setup` 跳过整个向导，

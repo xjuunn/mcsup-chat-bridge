@@ -106,7 +106,7 @@ function createGamePort(ctx: object, log: LogClient): GamePort | undefined {
 export const plugin = definePlugin({
   id: "chat-bridge",
   title: "聊天桥",
-  version: "0.1.15",
+  version: "0.1.16",
   license: "MIT",
   description: "采集 Minecraft 聊天与控制台消息，按可插拔平台分发，并支持平台消息回流游戏",
   resident: true,
@@ -121,8 +121,9 @@ export const plugin = definePlugin({
         path: "platforms",
         required: true,
         default: ["qq"],
+        choices: ["qq", "log"],
         label: "启用的平台",
-        description: "逗号分隔：QQ 官方机器人填 qq，本地日志填 log；默认 qq",
+        description: "QQ 官方机器人需要 qq；本地日志需要 log",
       },
       {
         path: "injectMode",

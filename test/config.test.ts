@@ -36,6 +36,37 @@ describe("配置解析", () => {
     const config = resolveConfig(parse({ platforms: ["log"], log: { prefix: "bridge" } }));
     expect(config.platformSettings.log).toEqual({ prefix: "bridge", level: "info" });
   });
+
+  it("QQ 配置片段随 platforms 一起下发", () => {
+    const config = resolveConfig(
+      parse({
+        platforms: ["qq"],
+        qq: { appId: "102000001", clientSecret: "s3cret", groups: ["G1"] },
+      }),
+    );
+    expect(config.platformSettings.qq).toMatchObject({
+      appId: "102000001",
+      clientSecret: "s3cret",
+      sandbox: false,
+      markdown: false,
+      passiveReply: true,
+      groups: ["G1"],
+    });
+  });
+
+  it("QQ 缺少 appId 时 schema 拒绝", () => {
+    expect(() => parse({ platforms: ["qq"], qq: { clientSecret: "s3cret" } })).toThrow();
+  });
+
+  it("入站开关与上限有默认值，且可覆盖", () => {
+    const defaults = resolveConfig(parse({}));
+    expect(defaults.inbound).toBe(true);
+    expect(defaults.inboundMaxLength).toBe(200);
+    const custom = resolveConfig(parse({ inbound: false, inboundServer: "creative", inboundMaxLength: 64 }));
+    expect(custom.inbound).toBe(false);
+    expect(custom.inboundServer).toBe("creative");
+    expect(custom.inboundMaxLength).toBe(64);
+  });
 });
 
 describe("平台注册表", () => {
@@ -52,7 +83,7 @@ describe("平台注册表", () => {
 
   it("内置平台可列出", () => {
     const ids = createRegistry().list().map((info) => info.id);
-    expect(ids).toEqual(["log", "null"]);
+    expect(ids).toEqual(["log", "null", "qq"]);
   });
 
   it("重复注册与非法 id 被拒绝", () => {

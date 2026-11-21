@@ -45,6 +45,14 @@ const platformStats = s.object({
   dropped: s.integer({ min: 0 }),
 });
 
+const inboundStats = s.object({
+  received: s.integer({ min: 0, label: "收到" }),
+  delivered: s.integer({ min: 0, label: "已注入" }),
+  dropped: s.integer({ min: 0, label: "已丢弃" }),
+  duplicates: s.integer({ min: 0, label: "重复" }),
+  failed: s.integer({ min: 0, label: "失败" }),
+});
+
 /** 桥尚未就绪时由入口层抛出；这里只要求解析器给出实例 */
 export type BridgeResolver = (ctx: object) => ChatBridge;
 
@@ -104,7 +112,7 @@ export function createQueries(resolve: BridgeResolver) {
 
     status: query("status")
       .title("运行状态")
-      .describe("采集、过滤、入库与各平台的投递统计")
+      .describe("采集、过滤、入库与各平台出站/入站统计")
       .output(
         s.object({
           started: s.boolean(),
@@ -113,9 +121,11 @@ export function createQueries(resolve: BridgeResolver) {
           duplicates: s.integer({ min: 0 }),
           skipped: s.integer({ min: 0 }),
           filtered: s.integer({ min: 0 }),
+          suppressed: s.integer({ min: 0, label: "回声抑制" }),
           stored: s.integer({ min: 0 }),
           categories: categoryCounts,
           platforms: s.array(platformStats),
+          inbound: inboundStats,
         }),
       )
       .display({ type: "detail" })

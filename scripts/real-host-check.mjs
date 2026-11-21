@@ -13,9 +13,11 @@
 
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import * as net from "node:net";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { WebSocketServer } from "ws";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const buildDir = path.join(root, "build");
@@ -36,6 +38,13 @@ const descriptor = JSON.parse(readFileSync(path.join(buildDir, "descriptor.json"
 assert(manifest.id === "chat-bridge", `manifest.id 应为 chat-bridge，实际 ${manifest.id}`);
 assert(manifest.capabilities.includes("events"), "manifest 缺少 events 能力");
 assert(manifest.capabilities.includes("console:read"), "manifest 缺少 console:read 能力");
+assert(manifest.capabilities.includes("console:write"), "manifest 缺少 console:write 能力");
+assert(manifest.capabilities.includes("server:read"), "manifest 缺少 server:read 能力");
+const qqSecretSchema = descriptor.schemas?.config?.properties?.qq?.properties?.clientSecret;
+assert(
+  qqSecretSchema !== undefined && qqSecretSchema["x-mcsup-secret"] === true,
+  "descriptor 未把 QQ clientSecret 标记为 x-mcsup-secret",
+);
 assert(
   Array.isArray(manifest.subscriptions) && manifest.subscriptions.includes("chat:message"),
   "manifest 未声明 chat:message 订阅",
@@ -60,6 +69,83 @@ if (address === null || typeof address === "string") {
   fail("无法取得监听端口");
 }
 const endpoint = `tcp://127.0.0.1:${address.port}`;
+
+// ---- 假 QQ 开放平台（官方 API v2）：HTTP OpenAPI + WebSocket Gateway -----
+const qqAppId = "102000001";
+const qqSecret = "qq-real-secret-123456";
+const qqAccessToken = "qq-access-token-1";
+const qqPosts = [];
+const qqFrames = [];
+let qqSocket;
+let qqIdentify;
+let qqTokenCalls = 0;
+let qqWs;
+
+const qqHttp = createServer((request, response) => {
+  const chunks = [];
+  request.on("data", (chunk) => chunks.push(chunk));
+  request.on("end", () => {
+    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    const raw = Buffer.concat(chunks).toString("utf8");
+    const body = raw === "" ? {} : JSON.parse(raw);
+    const reply = (status, payload) => {
+      response.writeHead(status, { "content-type": "application/json" });
+      response.end(JSON.stringify(payload));
+    };
+
+    if (url.pathname === "/token") {
+      if (body.appId !== qqAppId || body.clientSecret !== qqSecret) {
+        reply(401, { code: 11241, message: "invalid credentials" });
+        return;
+      }
+      qqTokenCalls += 1;
+      reply(200, { access_token: qqAccessToken, expires_in: 7200 });
+      return;
+    }
+    if (url.pathname === "/gateway") {
+      reply(200, { url: `ws://127.0.0.1:${qqWs.address().port}` });
+      return;
+    }
+    if (url.pathname.startsWith("/v2/groups/") || url.pathname.startsWith("/v2/users/")) {
+      qqPosts.push({ path: url.pathname, body, auth: request.headers.authorization });
+      reply(200, { id: `sent-${qqPosts.length}`, timestamp: "2026-11-21T12:00:00Z" });
+      return;
+    }
+    reply(404, { code: 404, message: "not found" });
+  });
+});
+await new Promise((resolve, reject) => {
+  qqHttp.once("error", reject);
+  qqHttp.listen(0, "127.0.0.1", resolve);
+});
+const qqApiBase = `http://127.0.0.1:${qqHttp.address().port}`;
+const qqTokenUrl = `${qqApiBase}/token`;
+
+qqWs = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+await new Promise((resolve, reject) => {
+  qqWs.once("error", reject);
+  qqWs.once("listening", resolve);
+});
+const qqReady = new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error("插件在 10 秒内未完成 QQ Identify")), 10_000);
+  qqWs.on("connection", (socket) => {
+    qqSocket = socket;
+    socket.on("message", (rawFrame) => {
+      const frame = JSON.parse(rawFrame.toString("utf8"));
+      qqFrames.push(frame);
+      if (frame.op === 2) {
+        qqIdentify = frame.d;
+        socket.send(
+          JSON.stringify({ op: 0, s: 1, t: "READY", d: { session_id: "real-sess-1" } }),
+        );
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+    socket.send(JSON.stringify({ op: 10, d: { heartbeat_interval: 45_000 } }));
+  });
+});
+
 const accepted = new Promise((resolve, reject) => {
   const timer = setTimeout(() => {
     reject(new Error("插件在 10 秒内未连接到宿主端点"));
@@ -113,6 +199,7 @@ const exitPromise = new Promise((resolve) => {
 });
 
 const frames = [];
+const hostCalls = [];
 let buffer = "";
 let socket;
 try {
@@ -140,11 +227,23 @@ socket.on("data", (chunk) => {
     const line = buffer.slice(0, index);
     buffer = buffer.slice(index + 1);
     if (line.trim() !== "") {
+      let frame;
       try {
-        frames.push(JSON.parse(line));
+        frame = JSON.parse(line);
       } catch {
         fail(`收到非 JSON 帧：${line}`);
       }
+      if (frame.type === "call") {
+        // 插件调用宿主能力：记录并给出可断言的默认响应
+        hostCalls.push(frame);
+        let output = null;
+        if (frame.capability === "server:read" && frame.method === "list") {
+          output = [{ name: "survival", status: "running" }];
+        }
+        send({ type: "result", id: frame.id, ok: true, output });
+        continue;
+      }
+      frames.push(frame);
     }
   }
 });
@@ -192,6 +291,8 @@ try {
   assert(hello.api === 1, `hello.api 异常：${hello.api}`);
   assert(hello.requested.includes("events"), "hello 未申请 events");
   assert(hello.requested.includes("console:read"), "hello 未申请 console:read");
+  assert(hello.requested.includes("console:write"), "hello 未申请 console:write");
+  assert(hello.requested.includes("server:read"), "hello 未申请 server:read");
   assert(hello.subscriptions.includes("console:line"), "hello 未订阅 console:line");
   successCases.push("hello 帧包含插件 id、能力与订阅");
 
@@ -199,17 +300,41 @@ try {
     type: "welcome",
     session_id: "real-session-1",
     host_version: "0.0.0-test",
-    granted: ["events", "console:read"],
+    granted: ["events", "console:read", "console:write", "server:read"],
     limits: {
       inflight: 8,
       frame_bytes: 1_048_576,
       event_queue: 1_024,
       log_lines_per_sec: 200,
     },
-    config: { revision: 1, values: { platforms: ["log", "null"] } },
+    config: {
+      revision: 1,
+      values: {
+        platforms: ["log", "null", "qq"],
+        qq: {
+          appId: qqAppId,
+          clientSecret: qqSecret,
+          apiBase: qqApiBase,
+          tokenUrl: qqTokenUrl,
+          groups: ["123456"],
+          label: "QQ",
+          sendIntervalMs: 10,
+        },
+      },
+    },
     scope: { kind: "machine" },
   });
   await delay(150);
+
+  // ---- QQ 凭证、Gateway 与 Identify ------------------------------------
+  await qqReady;
+  assert(qqTokenCalls === 1, `QQ token 应只取一次，实际 ${qqTokenCalls}`);
+  assert(
+    qqIdentify?.token === `QQBot ${qqAccessToken}`,
+    `Identify token 不符：${qqIdentify?.token}`,
+  );
+  assert(qqIdentify?.intents === 1 << 25, `默认 intents 应为 group_and_c2c，实际 ${qqIdentify?.intents}`);
+  successCases.push("QQ 适配器用 AppID/ClientSecret 换 token，完成 WebSocket Gateway Identify");
 
   // ---- 投递事件 ---------------------------------------------------------
   const at = (second) => `2026-11-21T12:00:${String(second).padStart(2, "0")}Z`;
@@ -321,9 +446,11 @@ try {
 
   // ---- 状态与平台投递 ---------------------------------------------------
   let status = await call("status");
-  const deadline = Date.now() + 5_000;
+  const deadline = Date.now() + 10_000;
   while (
-    (status.platforms[0]?.delivered < 12 || status.platforms[1]?.delivered < 12) &&
+    (status.platforms.find((p) => p.id === "log")?.delivered < 12 ||
+      status.platforms.find((p) => p.id === "null")?.delivered < 12 ||
+      qqPosts.length < 12) &&
     Date.now() < deadline
   ) {
     await delay(20);
@@ -342,16 +469,125 @@ try {
     "status 未记录死亡/进度",
   );
   assert(
-    status.platforms.length === 2 &&
+    status.platforms.length === 3 &&
       status.platforms[0].id === "log" &&
-      status.platforms[1].id === "null",
-    "status 平台列表不符",
+      status.platforms[1].id === "null" &&
+      status.platforms[2].id === "qq",
+    `status 平台列表不符：${status.platforms.map((p) => p.id).join(",")}`,
   );
   assert(
     status.platforms[0].delivered === 12 && status.platforms[1].delivered === 12,
-    `两个平台都应投递 12 条，实际 ${status.platforms.map((p) => p.delivered).join("/")}`,
+    `两个内置平台都应投递 12 条，实际 ${status.platforms.map((p) => p.delivered).join("/")}`,
   );
-  successCases.push("status 反映采集、跳过、分类与双平台投递计数");
+  successCases.push("status 反映采集、跳过、分类与三平台投递计数");
+
+  // ---- QQ 出站格式：游戏 → QQ ------------------------------------------
+  const chatSend = qqPosts.find(
+    (post) =>
+      post.path === "/v2/groups/123456/messages" &&
+      typeof post.body?.content === "string" &&
+      post.body.content.includes("[Steve]:有人吗"),
+  );
+  assert(chatSend !== undefined, "未收到格式为 [Steve]:有人吗 的 QQ 群消息");
+  assert(
+    chatSend.auth === `QQBot ${qqAccessToken}`,
+    `QQ 鉴权头不符：${chatSend.auth}`,
+  );
+  assert(chatSend.body.msg_type === 0, `纯文本 msg_type 应为 0，实际 ${chatSend.body.msg_type}`);
+  assert(
+    typeof chatSend.body.msg_seq === "number",
+    `出站消息应带 msg_seq，实际 ${JSON.stringify(chatSend.body.msg_seq)}`,
+  );
+  successCases.push("游戏聊天按 [玩家名]:消息 经官方 OpenAPI 发送到 QQ 群");
+
+  // ---- QQ 入站：QQ → 游戏 ----------------------------------------------
+  qqSocket.send(
+    JSON.stringify({
+      op: 0,
+      s: 2,
+      t: "GROUP_AT_MESSAGE_CREATE",
+      d: {
+        id: "91001",
+        group_openid: "123456",
+        content: "<@BOT1> <@M100> 来自QQ ",
+        timestamp: "2026-11-21T12:00:20Z",
+        mentions: [
+          { member_openid: "BOT1", member_nickname: "BridgeBot", is_you: true },
+          { member_openid: "M100", member_nickname: "Bob" },
+        ],
+        author: { member_openid: "u20002", member_nickname: "小A" },
+      },
+    }),
+  );
+  const injectDeadline = Date.now() + 5_000;
+  let injection;
+  while (injection === undefined && Date.now() < injectDeadline) {
+    injection = hostCalls.find(
+      (callFrame) =>
+        callFrame.capability === "console:write" &&
+        callFrame.method === "send_line" &&
+        typeof callFrame.input?.line === "string" &&
+        callFrame.input.line.includes("来自QQ"),
+    );
+    if (injection === undefined) {
+      await delay(20);
+    }
+  }
+  assert(injection !== undefined, "QQ 消息未通过 console:write 注入游戏");
+  assert(injection.input.server === "survival", `注入服务器应为 survival，实际 ${injection.input.server}`);
+  assert(
+    injection.input.line === `tellraw @a ${JSON.stringify({ text: "[QQ] 小A: @Bob 来自QQ" })}`,
+    `注入命令不符：${injection.input.line}`,
+  );
+  successCases.push("QQ 群消息经 console:write 以 tellraw @a 注入游戏，且把 @ 映射为昵称并移除机器人自身 @");
+
+  // 其他群不在白名单：不应进入游戏
+  const beforeBlocked = hostCalls.filter((c) => c.capability === "console:write").length;
+  qqSocket.send(
+    JSON.stringify({
+      op: 0,
+      s: 3,
+      t: "GROUP_AT_MESSAGE_CREATE",
+      d: {
+        id: "91002",
+        group_openid: "555555",
+        content: "不该进入",
+        author: { member_openid: "u20002", member_nickname: "小A" },
+      },
+    }),
+  );
+  await delay(300);
+  assert(
+    hostCalls.filter((c) => c.capability === "console:write").length === beforeBlocked,
+    "白名单外群消息不应注入游戏",
+  );
+
+  // 重复的消息 id：只注入一次
+  qqSocket.send(
+    JSON.stringify({
+      op: 0,
+      s: 4,
+      t: "GROUP_AT_MESSAGE_CREATE",
+      d: {
+        id: "91001",
+        group_openid: "123456",
+        content: "重复投递",
+        author: { member_openid: "u20002", member_nickname: "小A" },
+      },
+    }),
+  );
+  await delay(300);
+  assert(
+    !hostCalls.some((c) => typeof c.input?.line === "string" && c.input.line.includes("重复投递")),
+    "重复 message_id 不应再次注入游戏",
+  );
+  const inboundStatus = await call("status");
+  assert(
+    inboundStatus.inbound.delivered === 1 &&
+      inboundStatus.inbound.failed === 0,
+    `入站统计不符：${JSON.stringify(inboundStatus.inbound)}`,
+  );
+  successCases.push("QQ 入站白名单、重复消息过滤与入站统计真实生效");
 
   // ---- 配置热更新 -------------------------------------------------------
   const configId = nextId;
@@ -360,7 +596,19 @@ try {
     type: "config",
     id: configId,
     revision: 2,
-    values: { platforms: ["log", "null"], forwardCategories: ["chat"] },
+    values: {
+      platforms: ["log", "null", "qq"],
+      forwardCategories: ["chat"],
+      qq: {
+        appId: qqAppId,
+        clientSecret: qqSecret,
+        apiBase: qqApiBase,
+        tokenUrl: qqTokenUrl,
+        groups: ["123456"],
+        label: "QQ",
+        sendIntervalMs: 10,
+      },
+    },
   });
   const configResult = await resultOf(configId);
   assert(configResult.revision === 2, "config 回执 revision 不符");
@@ -378,7 +626,7 @@ try {
     filtered.platforms.every((platform) => platform.delivered === 12),
     "被过滤的 warning 不应投递到任何平台",
   );
-  successCases.push("配置热更新只影响转发，不影响采集，双平台一致");
+  successCases.push("配置热更新只影响转发，不影响采集，三平台一致");
 
   // ---- 心跳与平台适配器实际输出 ----------------------------------------
   send({ type: "ping", n: 7 });
@@ -403,6 +651,7 @@ try {
   if (!exited) {
     child.kill("SIGKILL");
   }
+  closeFakeQq();
   server.close();
   process.exit(1);
 }
@@ -412,7 +661,16 @@ for (const item of successCases) {
   console.log(`  - ${item}`);
 }
 console.log(`[real] 插件 stderr 共 ${stderr.length} 字节，退出码 0。`);
+closeFakeQq();
 server.close();
+
+function closeFakeQq() {
+  for (const socket of qqWs.clients) {
+    socket.terminate();
+  }
+  qqWs.close();
+  qqHttp.close();
+}
 
 function assert(condition, message) {
   if (!condition) {

@@ -13,12 +13,16 @@
 import type { LogClient } from "mcsup-plugin";
 
 import type { NormalizedMessage } from "../core/types.js";
-import type { ChatPlatform } from "../platforms/types.js";
+import type { ChatPlatform, GamePort, PlatformInboundMessage } from "../platforms/types.js";
 
 export interface DispatcherOptions {
   /** 每个平台的最大排队数（不含正在投递的那条） */
   readonly capacity: number;
   readonly log: LogClient;
+  /** 游戏侧端口；平台启动时注入上下文 */
+  readonly game?: GamePort;
+  /** 平台收到外部消息后的回调；由桥内核接手 */
+  readonly onInbound: (message: PlatformInboundMessage) => void;
   /** 停止时等待队列排空与 stop 钩子的上限 */
   readonly stopTimeoutMs?: number;
 }
@@ -78,7 +82,12 @@ export class PlatformDispatcher {
     const started: ChatPlatform[] = [];
     try {
       for (const slot of this.slots) {
-        await slot.platform.start({ log: this.options.log, signal: this.abort.signal });
+        await slot.platform.start({
+          log: this.options.log,
+          signal: this.abort.signal,
+          game: this.options.game,
+          inbound: this.options.onInbound,
+        });
         started.push(slot.platform);
       }
     } catch (error) {

@@ -23,6 +23,8 @@ const BASE: BridgeConfig = {
   consoleForward: true,
   storeSize: 10,
   queueCapacity: 8,
+  inbound: true,
+  inboundMaxLength: 200,
   platformSettings: {},
 };
 

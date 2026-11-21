@@ -92,7 +92,7 @@ function deferred(): { readonly promise: Promise<void>; readonly resolve: () => 
 describe("PlatformDispatcher", () => {
   it("按到达顺序投递并统计", async () => {
     const platform = new Recorder();
-    const dispatcher = new PlatformDispatcher([platform], { capacity: 8, log: fakeLog() });
+    const dispatcher = new PlatformDispatcher([platform], { capacity: 8, log: fakeLog(), onInbound: () => {} });
     await dispatcher.start();
     expect(platform.started).toBe(1);
 
@@ -114,7 +114,7 @@ describe("PlatformDispatcher", () => {
     bad.failing = true;
     const good = new Recorder();
     const log = fakeLog();
-    const dispatcher = new PlatformDispatcher([bad, good], { capacity: 8, log });
+    const dispatcher = new PlatformDispatcher([bad, good], { capacity: 8, log, onInbound: () => {} });
     await dispatcher.start();
 
     dispatcher.deliver(message(1));
@@ -131,7 +131,7 @@ describe("PlatformDispatcher", () => {
     const gate = deferred();
     slow.gate = gate.promise;
     const fast = new Recorder();
-    const dispatcher = new PlatformDispatcher([slow, fast], { capacity: 8, log: fakeLog() });
+    const dispatcher = new PlatformDispatcher([slow, fast], { capacity: 8, log: fakeLog(), onInbound: () => {} });
     await dispatcher.start();
 
     dispatcher.deliver(message(1));
@@ -151,7 +151,7 @@ describe("PlatformDispatcher", () => {
     const slow = new Recorder();
     const gate = deferred();
     slow.gate = gate.promise;
-    const dispatcher = new PlatformDispatcher([slow], { capacity: 1, log: fakeLog() });
+    const dispatcher = new PlatformDispatcher([slow], { capacity: 1, log: fakeLog(), onInbound: () => {} });
     await dispatcher.start();
 
     dispatcher.deliver(message(1));
@@ -171,6 +171,7 @@ describe("PlatformDispatcher", () => {
     const dispatcher = new PlatformDispatcher([platform], {
       capacity: 8,
       log: fakeLog(),
+      onInbound: () => {},
       stopTimeoutMs: 1_000,
     });
     await dispatcher.start();
@@ -185,7 +186,7 @@ describe("PlatformDispatcher", () => {
 
   it("停止后不再接收投递", async () => {
     const platform = new Recorder();
-    const dispatcher = new PlatformDispatcher([platform], { capacity: 8, log: fakeLog() });
+    const dispatcher = new PlatformDispatcher([platform], { capacity: 8, log: fakeLog(), onInbound: () => {} });
     await dispatcher.start();
     await dispatcher.stop("done");
 
@@ -198,7 +199,7 @@ describe("PlatformDispatcher", () => {
     const slow = new Recorder();
     const gate = deferred();
     slow.gate = gate.promise;
-    const dispatcher = new PlatformDispatcher([slow], { capacity: 2, log: fakeLog() });
+    const dispatcher = new PlatformDispatcher([slow], { capacity: 2, log: fakeLog(), onInbound: () => {} });
     await dispatcher.start();
 
     dispatcher.deliver(message(1));
@@ -223,6 +224,7 @@ describe("PlatformDispatcher", () => {
     const dispatcher = new PlatformDispatcher([first, second], {
       capacity: 8,
       log: fakeLog(),
+      onInbound: () => {},
     });
 
     await expect(dispatcher.start()).rejects.toThrow("boom-start");

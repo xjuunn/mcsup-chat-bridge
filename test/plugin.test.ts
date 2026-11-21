@@ -29,6 +29,7 @@ interface StatusView {
   readonly skipped: number;
   readonly filtered: number;
   readonly stored: number;
+  readonly suppressed: number;
   readonly categories: Record<string, number>;
   readonly platforms: Array<{
     readonly id: string;
@@ -38,6 +39,13 @@ interface StatusView {
     readonly failed: number;
     readonly dropped: number;
   }>;
+  readonly inbound: {
+    readonly received: number;
+    readonly delivered: number;
+    readonly dropped: number;
+    readonly duplicates: number;
+    readonly failed: number;
+  };
 }
 
 function unwrap<T>(result: CallResult): T {
@@ -58,7 +66,12 @@ describe("插件（MockHost 全链路）", () => {
     expect(hello).toBeDefined();
     if (hello?.type === "hello") {
       expect(hello.plugin_id).toBe("chat-bridge");
-      expect(hello.requested).toEqual(["events", "console:read"]);
+      expect(hello.requested).toEqual([
+        "events",
+        "console:read",
+        "console:write",
+        "server:read",
+      ]);
       expect(hello.subscriptions).toContain("chat:message");
       expect(hello.subscriptions).toContain("console:line");
       expect(hello.subscriptions).toContain("player:joined");

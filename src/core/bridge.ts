@@ -1,8 +1,12 @@
 /**
- * 桥内核：采集 → 归一化 → 分类 → 入库 → 分发
+ * 桥内核：采集 → 归一化 → 分类 → 入库 → 分发；以及 平台 → 游戏 的入站注入
  *
  * 不依赖 SDK 的 op / 事件 API，只接收 `EventMeta` 与原始负载；这样单测可以
  * 直接驱动内核，插件入口（`src/index.ts`）只做「接线」。
+ *
+ * 入站是独立的第二条边：适配器把平台原生事件翻译为 `PlatformInboundMessage`
+ * 后交给内核，内核统一做白名单之外的去重、长度限制、排队、回声抑制与注入。
+ * 平台适配器因此不需要知道游戏端如何选服务器、如何转义。
  */
 
 import { PluginError } from "mcsup-plugin";
@@ -10,10 +14,14 @@ import type { EventMeta, LogClient } from "mcsup-plugin";
 
 import { normalizeEvent } from "../events/normalize.js";
 import type { PlatformRegistry } from "../platforms/registry.js";
-import type { ChatPlatform } from "../platforms/types.js";
+import type {
+  ChatPlatform,
+  GamePort,
+  PlatformInboundMessage,
+} from "../platforms/types.js";
 import { PlatformDispatcher, type PlatformStats } from "./dispatcher.js";
 import { MessageStore } from "./store.js";
-import type { MessageCategory, MessageFilter, MessagePage } from "./types.js";
+import type { MessageCategory, MessageDraft, MessageFilter, MessagePage } from "./types.js";
 
 /** 运行期配置（由 `config.ts` 从宿主配置解析而来） */
 export interface BridgeConfig {
@@ -22,6 +30,12 @@ export interface BridgeConfig {
   readonly consoleForward: boolean;
   readonly storeSize: number;
   readonly queueCapacity: number;
+  /** 是否允许平台消息注入游戏 */
+  readonly inbound: boolean;
+  /** 入站默认服务器；省略时由 GamePort 自动选择 */
+  readonly inboundServer?: string;
+  /** 单条入站文本上限 */
+  readonly inboundMaxLength: number;
   /** 与平台 id 同名的配置片段 */
   readonly platformSettings: Readonly<Record<string, unknown>>;
 }
@@ -30,6 +44,22 @@ export interface BridgeOptions {
   readonly log: LogClient;
   readonly registry: PlatformRegistry;
   readonly config: BridgeConfig;
+  /** 游戏侧端口；未授予 `console:write` 时省略，入站会降级并计数 */
+  readonly game?: GamePort;
+}
+
+/** 入站统计 */
+export interface InboundStats {
+  /** 适配器交来的条数（含被拒绝的） */
+  readonly received: number;
+  /** 成功注入游戏的条数 */
+  readonly delivered: number;
+  /** 因配置关闭、未启动或队列溢出丢弃的条数 */
+  readonly dropped: number;
+  /** 平台消息 id 重复而丢弃的条数 */
+  readonly duplicates: number;
+  /** 注入失败的条数（无服务器、无权限、宿主报错） */
+  readonly failed: number;
 }
 
 /** `status` op 的数据源 */
@@ -40,15 +70,34 @@ export interface BridgeStatus {
   readonly duplicates: number;
   readonly skipped: number;
   readonly filtered: number;
+  /** 被回声抑制（自己注入的文本又回流）的条数 */
+  readonly suppressed: number;
   readonly stored: number;
   readonly categories: Record<MessageCategory, number>;
   readonly platforms: readonly PlatformStats[];
+  readonly inbound: InboundStats;
 }
+
+/** 入站任务的内部形状：已通过长度与去重检查 */
+interface InboundJob {
+  readonly platform: string;
+  readonly author: string;
+  readonly text: string;
+  readonly server?: string;
+  readonly label: string;
+}
+
+/** 回声窗口时长：注入后这段时间内出现的同文本消息视为自身回显 */
+const ECHO_TTL_MS = 60_000;
+const ECHO_WINDOW = 64;
+const SEEN_IDS = 1_024;
+const SEEN_TTL_MS = 10 * 60_000;
 
 export class ChatBridge {
   private readonly log: LogClient;
   private readonly registry: PlatformRegistry;
   private readonly store: MessageStore;
+  private readonly game: GamePort | undefined;
   private config: BridgeConfig;
   private dispatcher: PlatformDispatcher | undefined;
   private started = false;
@@ -57,11 +106,27 @@ export class ChatBridge {
   private duplicates = 0;
   private skipped = 0;
   private filtered = 0;
+  private suppressed = 0;
+  private inboundWarned = false;
+  private lastServer: string | undefined;
+
+  private readonly inboundQueue: InboundJob[] = [];
+  private inboundBusy = false;
+  private readonly inboundStats = {
+    received: 0,
+    delivered: 0,
+    dropped: 0,
+    duplicates: 0,
+    failed: 0,
+  };
+  private readonly inboundSeen = new Map<string, number>();
+  private readonly echoWindow: Array<{ readonly text: string; readonly at: number }> = [];
 
   public constructor(options: BridgeOptions) {
     this.log = options.log;
     this.registry = options.registry;
     this.config = options.config;
+    this.game = options.game;
     this.store = new MessageStore(options.config.storeSize);
   }
 
@@ -83,7 +148,8 @@ export class ChatBridge {
     this.started = true;
     this.startedAt = Date.now();
     this.log.info(
-      `聊天桥已启动：平台 [${this.config.platforms.join(", ")}]，缓存 ${this.config.storeSize} 条`,
+      `聊天桥已启动：平台 [${this.config.platforms.join(", ")}]，缓存 ${this.config.storeSize} 条` +
+        `，入站${this.game === undefined ? "降级（未授予 console:write）" : "已启用"}`,
     );
   }
 
@@ -126,6 +192,7 @@ export class ChatBridge {
       return;
     }
     this.started = false;
+    this.inboundQueue.length = 0;
     const dispatcher = this.dispatcher;
     this.dispatcher = undefined;
     if (dispatcher !== undefined) {
@@ -149,6 +216,11 @@ export class ChatBridge {
         this.skipped += 1;
         return;
       }
+      if (this.isEcho(result.draft)) {
+        this.suppressed += 1;
+        return;
+      }
+      this.lastServer = result.draft.server;
       const message = this.store.add(result.draft);
       if (message === null) {
         this.duplicates += 1;
@@ -166,6 +238,52 @@ export class ChatBridge {
     }
   }
 
+  /**
+   * 平台 → 游戏。适配器在收到外部消息后调用；这里立即返回（只入队）。
+   *
+   * 去重与长度限制在入口做，注入在独立消费者里串行执行，避免慢游戏端拖住
+   * 平台适配器的收包循环。
+   */
+  public handleInbound(message: PlatformInboundMessage): void {
+    this.inboundStats.received += 1;
+    if (!this.config.inbound) {
+      this.inboundStats.dropped += 1;
+      return;
+    }
+    if (!this.started) {
+      this.inboundStats.dropped += 1;
+      return;
+    }
+
+    const text = clampText(message.text, this.config.inboundMaxLength);
+    if (text === "") {
+      this.inboundStats.dropped += 1;
+      return;
+    }
+    if (message.messageId !== undefined && this.isDuplicate(message.platform, message.messageId)) {
+      this.inboundStats.duplicates += 1;
+      return;
+    }
+
+    if (this.inboundQueue.length >= this.config.queueCapacity) {
+      this.inboundQueue.shift();
+      this.inboundStats.dropped += 1;
+      if (!this.inboundWarned) {
+        this.inboundWarned = true;
+        this.log.warn(`入站队列已满（${this.config.queueCapacity}），丢弃最旧消息`);
+      }
+    }
+
+    this.inboundQueue.push({
+      platform: message.platform,
+      author: message.author.name,
+      text,
+      label: message.label ?? message.platform.toUpperCase(),
+      ...(message.server === undefined ? {} : { server: message.server }),
+    });
+    void this.pumpInbound();
+  }
+
   public recent(filter: MessageFilter = {}): MessagePage {
     return this.store.recent(filter);
   }
@@ -179,9 +297,11 @@ export class ChatBridge {
       duplicates: this.duplicates,
       skipped: this.skipped,
       filtered: this.filtered,
+      suppressed: this.suppressed,
       stored: this.store.size,
       categories: this.store.counts(),
       platforms: this.dispatcher?.stats() ?? [],
+      inbound: { ...this.inboundStats },
     };
   }
 
@@ -192,6 +312,10 @@ export class ChatBridge {
     return new PlatformDispatcher(platforms, {
       capacity: config.queueCapacity,
       log: this.log,
+      game: this.game,
+      onInbound: (message) => {
+        this.handleInbound(message);
+      },
     });
   }
 
@@ -200,6 +324,115 @@ export class ChatBridge {
       return false;
     }
     return this.config.forwardCategories.includes(category);
+  }
+
+  /** 串行消费入站队列；慢注入不会并发，也不会阻塞平台收包 */
+  private async pumpInbound(): Promise<void> {
+    if (this.inboundBusy) {
+      return;
+    }
+    this.inboundBusy = true;
+    try {
+      while (this.inboundQueue.length > 0) {
+        if (!this.started || !this.config.inbound) {
+          this.inboundQueue.length = 0;
+          return;
+        }
+        const job = this.inboundQueue.shift();
+        if (job === undefined) {
+          return;
+        }
+        await this.deliverInbound(job);
+      }
+    } finally {
+      this.inboundBusy = false;
+    }
+  }
+
+  private async deliverInbound(job: InboundJob): Promise<void> {
+    const port = this.game;
+    if (port === undefined) {
+      this.inboundStats.failed += 1;
+      if (!this.inboundWarned) {
+        this.inboundWarned = true;
+        this.log.warn(
+          "未授予 console:write：平台消息无法注入游戏，入站方向降级为仅计数",
+        );
+      }
+      return;
+    }
+
+    const line = `[${job.label}] ${job.author}: ${job.text}`;
+    try {
+      const server = await port.resolveServer(job.server ?? this.config.inboundServer ?? this.lastServer);
+      if (server === null) {
+        throw new Error("没有可用的服务器（可在 inboundServer 中指定）");
+      }
+      await port.sendChat(server, line);
+      this.rememberEcho(line);
+      this.inboundStats.delivered += 1;
+    } catch (error) {
+      this.inboundStats.failed += 1;
+      this.log.warn(`[${job.platform}] 入站注入失败：${errorText(error)}`);
+    }
+  }
+
+  /** 平台消息 id 去重：只保留最近 10 分钟，避免重连后重复注入 */
+  private isDuplicate(platform: string, messageId: string): boolean {
+    const key = `${platform}:${messageId}`;
+    const now = Date.now();
+    const seenAt = this.inboundSeen.get(key);
+    if (seenAt !== undefined && now - seenAt <= SEEN_TTL_MS) {
+      return true;
+    }
+    if (this.inboundSeen.size >= SEEN_IDS) {
+      this.prune(this.inboundSeen, now);
+      if (this.inboundSeen.size >= SEEN_IDS) {
+        const oldest = this.inboundSeen.keys().next();
+        if (!oldest.done) {
+          this.inboundSeen.delete(oldest.value);
+        }
+      }
+    }
+    this.inboundSeen.set(key, now);
+    return false;
+  }
+
+  /**
+   * 回声抑制：`tellraw` 注入后，若宿主把同一文本再作为聊天/控制台事件送回来，
+   * 记录并丢弃，避免「游戏 → QQ → 游戏」自激。
+   */
+  private isEcho(draft: MessageDraft): boolean {
+    if (this.echoWindow.length === 0) {
+      return false;
+    }
+    const now = Date.now();
+    this.pruneEcho(now);
+    const haystack = `${draft.text}\n${draft.raw ?? ""}`;
+    return this.echoWindow.some((entry) => haystack.includes(entry.text));
+  }
+
+  private rememberEcho(text: string): void {
+    const now = Date.now();
+    this.pruneEcho(now);
+    this.echoWindow.push({ text, at: now });
+    if (this.echoWindow.length > ECHO_WINDOW) {
+      this.echoWindow.shift();
+    }
+  }
+
+  private pruneEcho(now: number): void {
+    while (this.echoWindow.length > 0 && now - (this.echoWindow[0]?.at ?? now) > ECHO_TTL_MS) {
+      this.echoWindow.shift();
+    }
+  }
+
+  private prune(seen: Map<string, number>, now: number): void {
+    for (const [key, seenAt] of seen) {
+      if (now - seenAt > SEEN_TTL_MS) {
+        seen.delete(key);
+      }
+    }
   }
 }
 
@@ -221,6 +454,15 @@ function dispatcherUnchanged(a: BridgeConfig, b: BridgeConfig): boolean {
     }
   }
   return true;
+}
+
+/** 单条入站文本：折叠空白、去控制字符、按字符数截断 */
+function clampText(text: string, max: number): string {
+  const clean = text.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  if (clean.length <= max) {
+    return clean;
+  }
+  return `${clean.slice(0, Math.max(0, max - 1))}…`;
 }
 
 function jsonOf(value: unknown): string {

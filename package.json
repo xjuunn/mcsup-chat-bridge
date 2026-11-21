@@ -2,7 +2,7 @@
   "name": "mcsup-chat-bridge",
   "version": "0.1.0",
   "private": true,
-  "description": "MCSUP 聊天桥插件：采集并分类 Minecraft 聊天与控制台消息，按可插拔平台分发",
+  "description": "MCSUP 聊天桥插件：Minecraft 聊天与控制台消息分发到可插拔平台，并支持 QQ 等平台消息回流游戏",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -22,10 +22,12 @@
   },
   "dependencies": {
     "mcsup-plugin": "file:../mcsup/sdks/typescript",
+    "ws": "^8.23.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@types/ws": "^8.18.2",
     "typescript": "^5.7.2",
     "vitest": "^3.0.0"
   }

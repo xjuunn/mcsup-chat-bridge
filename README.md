@@ -2,7 +2,12 @@
 
 MCSUP 聊天桥插件：订阅 Minecraft 服务器的聊天、控制台与生命周期事件，归一化为统一消息模型，分类后分发到可插拔的聊天平台。
 
-当前阶段只实现「采集 → 归一化 → 分类 → 入库 → 可插拔分发」的基础架构，**没有对接任何真实聊天平台**。内置的 `log` / `null` 平台只用于验证链路。
+架构分两层：平台无关内核（采集 → 归一化 → 分类 → 入库 → 分发）与可插拔平台适配器。内置 **QQ 官方机器人（API v2）**、`log`、`null` 三种适配器。
+
+QQ 适配器支持**双向互通**：
+
+- 游戏 → QQ：玩家聊天按 `[玩家名]:消息` 发送到群/私聊；
+- QQ → 游戏：群聊消息（可选私聊）经 `console:write` 以 `tellraw @a` 注入游戏，显示为 `[QQ] 昵称: 消息`。
 
 ## 快速开始
 
@@ -32,21 +37,22 @@ src/
     classify.ts             聊天 / 控制台行 / 生命周期 / 玩家的分类规则
     store.ts                环形缓存（头指针淘汰 + 文本截断）、去重、seq 游标分页
     dispatcher.ts           每平台固定大小环形队列 + 串行消费者 + 故障隔离
-    bridge.ts               内核编排：启动、配置热更新、采集、停止
+    bridge.ts               内核编排：启动、配置热更新、采集、入站注入、回声抑制
   platforms/                可插拔平台层
-    types.ts                ChatPlatform / PlatformFactory 契约
+    types.ts                ChatPlatform / PlatformFactory / GamePort / 入站消息契约
     registry.ts             注册表（id 校验、实例化）
+    qq.ts                   QQ 官方机器人 API v2（WebSocket Gateway + OpenAPI，双向）
     log.ts                  占位平台：写到插件日志
     null.ts                 空平台：只采集、不投递
     index.ts                内置平台注册入口
   events/normalize.ts       宿主事件校验（zod）与归一化
-  config.ts                 配置 schema、resolveConfig、平台配置切片
-  ops/index.ts              messages（table + 分页）与 status（detail）
-  index.ts                  definePlugin 接线、订阅声明、会话级桥实例
+  config.ts                 配置 schema（含 QQ 与密钥字段）、resolveConfig
+  ops/index.ts              messages（table + 分页）与 status（detail，含入站统计）
+  index.ts                  definePlugin 接线、能力声明、GamePort（tellraw）
 scripts/
   ensure-sdk.mjs            SDK 缺失或过期（mtime）时自动构建
-  real-host-check.mjs       真实子进程 + 真实 TCP 假宿主全链路测试
-test/                       分类、存储、分发、桥、配置、事件、MockHost 全链路
+  real-host-check.mjs       真实子进程 + 真实 TCP 假宿主 + 真实 QQ 官方协议（REST + Gateway）
+test/                       分类、存储、分发、桥、入站、QQ、配置、事件、MockHost
 ```
 
 构建产物在 `build/`：`manifest.json`、`descriptor.json`、`bin/run.cmd|run.sh`、`bin/entry.mjs`、`dist/`。
@@ -100,22 +106,64 @@ test/                       分类、存储、分发、桥、配置、事件、M
 | `forwardCategories` | 全部类别 | 转发到平台的类别；仍会采集入库 |
 | `consoleForward` | `true` | 为 `false` 时控制台消息不转发 |
 | `storeSize` | `200` | 环形缓存条数（10–5000） |
-| `queueCapacity` | `256` | 单平台积压上限（8–4096），超出丢最旧 |
+| `queueCapacity` | `256` | 单平台出站与全局入站队列的积压上限（8–4096），超出丢最旧 |
+| `inbound` | `true` | 是否允许平台消息注入游戏；关闭后 QQ 仍可出站 |
+| `inboundServer` | 自动 | 入站默认服务器；省略时选运行中的服务器 |
+| `inboundMaxLength` | `200` | 单条入站文本上限（32–512），超长截断 |
 | `log.prefix` | `"chat-bridge"` | 日志平台前缀 |
 | `log.level` | `"info"` | `info` / `debug` |
+| `qq.appId` | 无（必填） | QQ 开放平台机器人 AppID |
+| `qq.clientSecret` | 无（必填） | 密钥；用于换取 `access_token`，界面遮蔽、读取打码 |
+| `qq.sandbox` | `false` | 为 `true` 时用 `sandbox.api.sgroup.qq.com` |
+| `qq.apiBase` | 按 sandbox 推导 | OpenAPI 基址，一般无需修改 |
+| `qq.tokenUrl` | 官方凭证地址 | `https://bots.qq.com/app/getAppAccessToken` |
+| `qq.intents` | `["group_and_c2c"]` | 事件订阅位；可选 `guilds` / `direct_message` / `interaction` 等 |
+| `qq.markdown` | `false` | 为 `true` 用 `msg_type=2` 发 Markdown；默认纯文本避免符号被渲染 |
+| `qq.groups` | `[]` | 出站 `group_openid`；同时是入站白名单 |
+| `qq.privateUsers` | `[]` | 出站私聊 `user_openid`（官方 API 用 openid，不是 QQ 号） |
+| `qq.allowedUsers` | `[]` | 非空时只允许这些 openid 进入游戏 |
+| `qq.categories` | 沿用全局 | QQ 出站类别过滤 |
+| `qq.inbound` | `true` | 是否把 QQ 消息注入游戏 |
+| `qq.allowPrivate` | `false` | 是否接收私聊（默认关闭，避免陌生人打扰） |
+| `qq.label` | `"QQ"` | 游戏内显示为 `[QQ] 昵称: 消息` |
+| `qq.server` | 全局 | 该适配器的入站默认服务器 |
+| `qq.maxLength` | `1500` | 单条出站上限，超出按此分片（官方上限约 4000） |
+| `qq.passiveReply` | `true` | 优先用最近入站消息的 `msg_id` 被动回复 |
+| `qq.passiveLimit` | `4` | 同一消息最多被动回复次数（群聊 5、管理员 50） |
+| `qq.passiveTtlMs` | `3300000` | 被动回复时效，官方窗口 60 分钟 |
+| `qq.sendIntervalMs` | `500` | 两次 OpenAPI 调用的最小间隔，温柔限流 |
+| `qq.apiTimeoutMs` | `15000` | 单次 HTTP 调用超时 |
+| `qq.reconnectMinMs` / `reconnectMaxMs` | `1000` / `60000` | 重连退避范围（带抖动） |
+| `qq.reconnectMaxAttempts` | `0` | 最大重连次数，0 表示无限重试 |
 
-平台专属配置放在与适配器 id 同名的字段下。示例：
+平台专属配置放在与适配器 id 同名的字段下。QQ 示例：
 
 ```json
 {
-  "platforms": ["log"],
+  "platforms": ["qq"],
   "forwardCategories": ["chat", "command", "join", "leave", "death", "advancement"],
-  "consoleForward": true,
-  "storeSize": 200,
-  "queueCapacity": 256,
-  "log": { "prefix": "bridge", "level": "info" }
+  "inbound": true,
+  "inboundServer": "survival",
+  "qq": {
+    "appId": "102000001",
+    "clientSecret": "your-client-secret",
+    "groups": ["GROUP_OPENID"],
+    "allowedUsers": [],
+    "allowPrivate": false,
+    "label": "QQ",
+    "server": "survival"
+  }
 }
 ```
+
+**密钥与持久化**：`qq.clientSecret` 用 SDK 的 `secretInput` 标记，descriptor 里是
+`x-mcsup-secret: true`。宿主负责按插件隔离、加密持久化（`secrets.json`），
+管理端读取时返回 `***`，插件握手时收到明文才能工作；插件自身不落盘任何密钥，
+日志与 `status` 也不会输出 `clientSecret` 或 `access_token`。
+
+**能力声明**：`events`、`console:read`、`console:write`、`server:read`。
+`console:write` 属高风险能力，必须由用户显式授予。未授予时插件仍会正常出站，
+但 QQ → 游戏方向降级为仅计数并在日志与 `status.inbound.failed` 中体现，不会假装成功。
 
 配置热更新的语义：
 
@@ -154,44 +202,107 @@ messages { "server": "survival", "limit": 20 }
 | `duplicates` | 内容摘要重复被丢弃条数 |
 | `skipped` | 空行、结构化重复投影、未知事件等 |
 | `filtered` | 已入库但按配置不转发的条数 |
+| `suppressed` | 注入游戏后又被宿主回显、被回声抑制的条数 |
 | `stored` | 当前缓存条数 |
 | `categories` | 各类别累计计数（不受环形淘汰影响） |
 | `platforms` | 每个平台的 `queued` / `delivered` / `failed` / `dropped` |
+| `inbound` | `received` / `delivered` / `dropped` / `duplicates` / `failed` |
+
+## QQ 机器人对接
+
+本项目对接的是 **QQ 开放平台官方机器人 API v2**（`bot.q.qq.com`），不是 OneBot 社区实现。
+
+### 前置条件
+
+1. 在 [QQ 开放平台](https://q.qq.com/open) 创建机器人，取得 **AppID** 与 **ClientSecret**。
+2. 在机器人管理端配置事件订阅：群聊/单聊消息；如需频道能力，另开 `guilds` 等 intents。
+3. 把机器人拉进目标群，并取得群的 `group_openid` 填入 `qq.groups`；私聊对象用 `user_openid` 填入 `qq.privateUsers`。
+4. 官方机器人在群里**默认只能收到 @ 它的消息**。若要在群里看到全部聊天，需在开放平台开通“接收所有消息”（适配器会自动处理 `GROUP_MESSAGE_CREATE`）；注意该权限可能影响 @ 消息的投递方式。
+
+### 协议链路
+
+- **访问凭证**：`POST https://bots.qq.com/app/getAppAccessToken`，body `{appId, clientSecret}`，返回 `{access_token, expires_in}`；随后所有 OpenAPI 请求带 `Authorization: QQBot <access_token>`。
+- **事件**：`GET {apiBase}/gateway` 取 wss 地址，连上后等待 op 10 Hello，再发 op 2 Identify（`token: "QQBot <token>"` + `intents` + `shard`）。断线优先 op 6 Resume；会话失效才重新 Identify。
+- **发送**：`POST /v2/groups/{group_openid}/messages` 或 `/v2/users/{user_openid}/messages`，`msg_type=0` 纯文本、`2` Markdown。
+- **被动回复**：记录每个会话最近一条入站消息的 `msg_id`，出站时带 `msg_id + 递增 msg_seq`。额度用尽或窗口过期才降级为主动消息。
+
+### 消息格式
+
+| 方向 | 格式 | 说明 |
+| --- | --- | --- |
+| 游戏 → QQ | `[玩家名]:消息` | 玩家聊天严格使用此格式，例如 `[Steve]:你好` |
+| 游戏 → QQ（非聊天） | `[加入] Alex: Alex 加入了游戏` | 用中文类别标签，避免歧义 |
+| QQ → 游戏 | `[QQ] 昵称: 消息` | 通过 `tellraw @a` 注入，可选 `qq.server` / `inboundServer` |
+
+出站只发送纯文本（或显式开启的 Markdown），不拼任何平台标记；入站会把 `<@openid>` 映射成昵称、去掉机器人自身的 @，附件转为 `[图片]` / `[语音] ASR` / `[文件: 名称]` 占位文本。
+
+### 可靠性行为
+
+- **鉴权**：`clientSecret` 只用于换 token，且只发给官方凭证地址；OpenAPI 用 `Authorization: QQBot`。
+- **重连**：指数退避 + 抖动；关闭码语义按官方协议处理——`4004` 清 token、`4006/4007/4900~4913` 重建会话、`4008` 限流等待 60 秒、`4013/4014/4914/4915` 等致命错误停止重连。
+- **心跳**：按 Hello 下发的 `heartbeat_interval` 发送 op 1，并带最新 `s`。
+- **限流**：两次 OpenAPI 调用之间至少 `sendIntervalMs`；429/5xx 退避重试；`msg_id+msg_seq` 重复时换 seq 重发。
+- **去重**：入站按消息 id 记忆最近 1000 条，桥内核再按 `platform:id` 去重 10 分钟；重连后不会重复注入。
+- **过滤**：只接收 `qq.groups` 内的群与 `qq.privateUsers` 内的私聊；`allowedUsers` 可进一步收窄发言人；机器人自己的消息不会被回灌。
+- **注入安全**：`tellraw` JSON 组件转义，不用 `say`，并在桥内核按注入文本做 60 秒回声抑制，避免「游戏 → QQ → 游戏」自激。
+
+### 官方频控（不可绕过）
+
+- 主动消息：群 bot 维度 60 条/分钟、单关系 20 条/分钟、每群 1000 条/天；单聊 20 条/分钟、1000 条/天/用户。
+- 被动回复：单聊 60 分钟内 4 次、群聊 5 次、群管理员 50 次，且必须带 60 分钟内的 `msg_id`。
+
+因此适配器默认优先被动回复，并把 `sendIntervalMs` 当保护值；高频服务器建议只转发 `chat` / `join` / `leave` / `death` 等关键类别。
+
+### 本地验证
+
+没有真实 QQ 凭证时，`npm run test:real` 会启动一个真实的 **HTTP OpenAPI + WebSocket Gateway** 假服务端，并验证：
+
+- `AppID/ClientSecret` 换 token，Identify 的 `token` 为 `QQBot <access_token>`、默认 intents 为 `group_and_c2c`；
+- 游戏事件 → `POST /v2/groups/<openid>/messages`，`msg_type=0`、文本为 `[Steve]:有人吗`、带 `msg_seq`；
+- QQ 群消息事件 → 宿主 `console:write/send_line`，命令为
+  `tellraw @a {"text":"[QQ] 小A: 来自QQ"}`；
+- 非白名单群与重复消息 id 不会二次注入；
+- `status.inbound` 计数正确，进程最终以退出码 0 结束。
+
+真实联调只需把 `qq.appId` / `qq.clientSecret` / `qq.groups` 换成机器人的实际配置。
 
 ## 扩展一个新的聊天平台
 
-只需要三步，内核与 op 层都不用改。
+只需要三步，内核与 op 层都不用改。以下以 `telegram` 为例（QQ 已内置，可直接参照 `src/platforms/qq.ts`）。
 
 ### 1. 实现 `PlatformFactory`
 
 ```ts
-// src/platforms/qq.ts
+// src/platforms/telegram.ts
 import type { NormalizedMessage } from "../core/types.js";
 import type { ChatPlatform, PlatformFactory } from "./types.js";
 
-export const qqPlatformFactory: PlatformFactory = {
-  id: "qq",
-  title: "QQ 群",
-  description: "把消息发到 QQ 群（占位示例）",
+export const telegramPlatformFactory: PlatformFactory = {
+  id: "telegram",
+  title: "Telegram",
+  description: "Telegram Bot API",
   create({ log, settings }) {
-    const config = (settings ?? {}) as { endpoint?: string; groupId?: string };
-    if (config.endpoint === undefined || config.groupId === undefined) {
-      // 抛错会让启动失败，宿主按配置错误处理
-      throw new Error("qq.endpoint 与 qq.groupId 必填");
+    const config = (settings ?? {}) as { token?: string; chatId?: string };
+    if (config.token === undefined || config.chatId === undefined) {
+      // 抛错会让启动失败，宿主按配置错误处理并回滚
+      throw new Error("telegram.token 与 telegram.chatId 必填");
     }
     return {
-      id: "qq",
-      title: "QQ 群",
+      id: "telegram",
+      title: "Telegram",
       async start(ctx) {
-        // 建立连接；ctx.signal 在桥停止时 abort
-        log.info(`[qq] 已连接 ${config.endpoint}`);
+        // 建立连接；ctx.game 用于 QQ/Telegram → 游戏，ctx.inbound 交给内核
+        log.info(`[telegram] 已启动`);
       },
       async deliver(message: NormalizedMessage) {
-        // 内核保证同一平台串行调用，这里不用自己排队
-        log.debug(`[qq] ${message.server} ${message.text}`);
+        const text =
+          message.category === "chat" && message.from !== null
+            ? `[${message.from}]:${message.text}`
+            : message.text;
+        log.debug(`[telegram] ${text}`);
       },
       async stop(reason) {
-        log.debug(`[qq] 断开：${reason}`);
+        log.debug(`[telegram] 断开：${reason}`);
       },
     } satisfies ChatPlatform;
   },
@@ -202,12 +313,13 @@ export const qqPlatformFactory: PlatformFactory = {
 
 ```ts
 // src/platforms/index.ts
-import { qqPlatformFactory } from "./qq.js";
+import { telegramPlatformFactory } from "./telegram.js";
 
 export const BUILTIN_PLATFORMS: readonly PlatformFactory[] = [
   logPlatformFactory,
   nullPlatformFactory,
   qqPlatformFactory,
+  telegramPlatformFactory,
 ];
 ```
 
@@ -215,18 +327,18 @@ export const BUILTIN_PLATFORMS: readonly PlatformFactory[] = [
 
 ```ts
 // src/config.ts，configSchema 内
-qq: s.optional(
+telegram: s.optional(
   s.object(
     {
-      endpoint: s.string({ label: "WebSocket 地址" }),
-      groupId: s.string({ label: "群号" }),
+      token: secretInput(s.string({ label: "Bot Token", max: 256 })),
+      chatId: s.string({ label: "默认会话", max: 64 }),
     },
-    { label: "QQ 群" },
+    { label: "Telegram" },
   ),
 ),
 ```
 
-之后配置 `"platforms": ["qq"]` 就会实例化；`config.qq` 这个片段会原样传给工厂的 `settings`。
+之后配置 `"platforms": ["telegram"]` 就会实例化；`config.telegram` 这个片段会原样传给工厂的 `settings`。
 
 ### 适配器约定
 
@@ -234,18 +346,24 @@ qq: s.optional(
 - 队列满时内核丢最旧消息并计入 `dropped`，适配器不需要处理背压。
 - `deliver` 抛错只计入 `failed` 并记日志，不会打断消费者，也不影响其他平台。
 - 连接、重连、限流、鉴权都由适配器自己负责；内核只提供 `AbortSignal` 与 `stop(reason)`。
+- **入站**：适配器收到外部消息后调用 `ctx.inbound({ platform, channel, author, text, messageId? })`；
+  内核统一做去重、长度限制、排队、回声抑制，并通过 `ctx.game` 注入游戏。
+  适配器不需要知道服务器选择、`tellraw` 转义或队列细节。
+- **降级**：`ctx.game` 在未授予 `console:write` 时为 `undefined`；适配器只负责上报消息，
+  内核会记录失败计数，不要求适配器自己判断权限。
 - 平台 id 必须匹配 `^[a-z][a-z0-9-]{0,31}$`，且与 `create()` 返回实例的 `id` 一致。
 
 ## 运行保证与边界
 
-- **不持久化**：只保留最近 `storeSize` 条；进程重启即丢失。
-- **内存有界**：分发队列是固定大小环形缓冲（丢最旧 O(1)，慢消费者不会让数组增长）；入库文本/原始行分别截断到 1000/4000 字符，超长控制台行不会撑爆缓存或结果帧。
+- **不持久化消息**：只保留最近 `storeSize` 条；进程重启即丢失。**插件配置与密钥由宿主持久化并按插件隔离**，聊天桥不落盘。
+- **内存有界**：分发队列是固定大小环形缓冲（丢最旧 O(1)，慢消费者不会让数组增长）；入站队列同样有界；入库文本/原始行分别截断到 1000/4000 字符，超长控制台行不会撑爆缓存或结果帧。
 - **事件是触发语义**：宿主不补发，断线期间的消息不会回填。
-- **单平台保序**：同一平台内严格按入库顺序投递。
+- **单平台保序**：同一平台内严格按入库顺序投递；入站注入也串行，保证游戏内顺序稳定。
 - **平台间隔离**：一个平台慢或抛错不影响采集与其他平台。
 - **停止**：先排空队列，再 abort 信号并调用 `stop`；排空与 `stop` 各有默认 3 秒上限，超时记 warn。
-- **去重**：同内容摘要只入库一次；跨服务器重启的同内容事件也会被视为重复。
+- **去重**：同内容摘要只入库一次；入站按平台消息 id 去重并保留 10 分钟；注入文本回流会被回声抑制。
 - **配置回滚**：平台配置变更失败时保留旧平台，不会出现“两边都没有”的空窗。
+- **能力降级**：未授予 `console:write` 时出站正常、入站计数为失败，不伪造成功。
 
 ## 测试
 
@@ -262,22 +380,29 @@ npm run test:real   # 真实进程 + 真实 TCP 端点
 - 环形缓存、去重、游标分页、容量淘汰、过滤、超长文本截断、持续大量写入
 - 固定环队列、单平台保序、平台隔离、持续溢出丢最旧、平台启动失败回滚、停止排空
 - 桥的启动/停止/配置热更新/启动前配置/平台切换/过滤配置不重建/未知平台回滚
-- 配置默认值、去重、平台配置切片、注册表重复与非法 id
+- 配置默认值、去重、平台配置切片、QQ 配置片段与入站默认值、注册表重复与非法 id
 - 事件负载校验、非法时间回退、缺失服务器名兜底
+- **入站**：格式化注入、`inboundServer`、去重、截断、全局关闭、无 `console:write` 降级、回声抑制
+- **QQ**：配置校验与默认值、`[玩家名]:消息` 格式、官方入站事件归一（@ 映射/附件/引用）、
+  假 Gateway 上的 Identify、被动回复 `msg_id+msg_seq`、白名单、去重、Markdown、401 刷新 token、分片与关闭码处理
 - MockHost：握手声明、事件 → 分类 → 入库 → 查询、配置热更新、非法配置回滚、未知平台退出码
 
-`test:real` 不是纯单元测试：它会启动构建产物 `build/bin/run.cmd`（Windows）或 `run.sh`，作为真实子进程连接本机 TCP 假宿主，走完整线上协议：
+`test:real` 不是纯单元测试：它会启动构建产物 `build/bin/run.cmd`（Windows）或 `run.sh`，作为真实子进程连接本机 TCP 假宿主，走完整线上协议；同时启动一个真实的 QQ 官方协议假服务端（HTTP OpenAPI + WebSocket Gateway）：
 
-1. 插件发 `hello`，断言 `plugin_id`、能力、订阅
-2. 宿主回 `welcome`，下发双平台配置（`log` + `null`）与限额
-3. 投递 14 条事件（聊天、命令、加入/离开、控制台警告/错误/系统行、死亡、进度、服务器启动/就绪/崩溃）
-4. 调用 `messages` 验证游标分页、类别过滤、source / server 过滤、8 种类别与去重/去色
-5. 调用 `status` 验证采集、跳过、分类与两个平台的投递计数
-6. 下发 `config` 验证热更新只影响转发，双平台计数一致
-7. `ping` / `pong`，检查日志平台的真实 stderr 输出
-8. `shutdown`，断言退出码 0
+1. 插件发 `hello`，断言 `plugin_id`、四项能力（含 `console:write` / `server:read`）与订阅
+2. 宿主回 `welcome`，下发三平台配置（`log` + `null` + `qq`）与限额；QQ 指向假 OpenAPI
+3. QQ 适配器用 AppID/ClientSecret 换 token，完成 Identify（`QQBot <token>` + `group_and_c2c`）
+4. 投递 14 条事件（聊天、命令、加入/离开、控制台警告/错误/系统行、死亡、进度、服务器启动/就绪/崩溃）
+5. 调用 `messages` 验证游标分页、类别过滤、source / server 过滤、8 种类别与去重/去色
+6. 调用 `status` 验证采集、跳过、分类与三个平台的投递计数
+7. 断言 OpenAPI 收到 `POST /v2/groups/123456/messages`，`msg_type=0`、文本为 `[Steve]:有人吗`
+8. 推送 `GROUP_AT_MESSAGE_CREATE`，断言宿主收到 `console:write/send_line`
+   `tellraw @a {"text":"[QQ] 小A: 来自QQ"}`；非白名单群与重复消息 id 不注入
+9. 下发 `config` 验证热更新只影响转发，三平台计数一致
+10. `ping` / `pong`，检查日志平台的真实 stderr 输出
+11. `shutdown`，断言退出码 0
 
-说明：本机没有可启动的 Minecraft 服务器与真实 MCSUP 宿主，所以对端是“假宿主”，但它跑的是真实帧协议、真实进程、真实 socket；插件侧的分类与分发逻辑没有被 mock。
+说明：本机没有可启动的 Minecraft 服务器与真实 MCSUP 宿主，也没有真实 QQ 凭证，所以对端是“假宿主 + 假 QQ 开放平台”，但它们跑的是真实帧协议、真实进程、真实 socket、真实 HTTP 与真实 WebSocket 握手；插件侧的分类、分发、QQ 协议与入站注入逻辑没有被 mock。
 
 Windows 启动器经 `cmd.exe /d /s /c` 调用，并使用 `windowsVerbatimArguments`：Node 默认会给含空格的参数加引号并把内部引号转义成 `\"`，而 `cmd.exe` 不认反斜杠转义，会直接报“不是内部或外部命令”。测试脚本里对“等待连接”设了 10 秒超时，启动失败时会打印插件 stderr 而不是无限挂起。
 
@@ -291,8 +416,10 @@ Windows 启动器经 `cmd.exe /d /s /c` 调用，并使用 `windowsVerbatimArgum
 
 ## 已知限制 / 下一步
 
-- 未实现 QQ Bot、Telegram、Discord 等真实适配器；本阶段只保留契约与占位实现。
-- 未实现平台 → Minecraft 的反向消息（本阶段只做采集与分发）。
+- 已内置 QQ 官方机器人（API v2）；Telegram、Discord 等平台可按同一契约继续添加。
+- 入站只处理文本与常见消息段（图片/语音/文件转为占位文本）；不支持图片内容落盘、回复链与话题线程。
+- QQ 官方机器人在群聊默认只能收到 @ 消息；全量群消息需在开放平台开通权限，并受官方主动消息频控约束。
+- 与真实 QQ 端联调需要用户提供 AppID/ClientSecret 与机器人环境；仓库内用真实 HTTP + WebSocket 假服务端验证协议链路。
 - 插件静态订阅 `console:line`，无法运行期退订；高噪音环境靠 `consoleForward` / `forwardCategories` 控制转发。
 - 内存环形缓存，不落盘；需要历史时应由宿主查询或后续接持久化。
 - 尚未与真实 MCSUP 宿主 + Minecraft 服务器联调；真实宿主联调放在下一阶段。

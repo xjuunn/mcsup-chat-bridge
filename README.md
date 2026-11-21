@@ -145,7 +145,8 @@ test/                       分类、存储、分发、桥、入站、QQ、配�
 | `qq.inbound` | `true` | 是否把 QQ 消息注入游戏 |
 | `qq.allowPrivate` | `false` | 是否接收私聊（默认关闭，避免陌生人打扰） |
 | `qq.syncChannels` | `true` | 群聊与私聊互相同步：群里收到的消息也会发到私聊目标，私聊收到的也会发到群目标；只影响 QQ 内部会话，不影响游戏注入；来源会话不重复发送 |
-| `qq.forwardMedia` | `true` | 群/私聊互转时用一条 Markdown 图文消息转发图片（文字在前、图片在后）；Markdown 失败退回标题文本 + 富媒体上传。QQ 表情统一转为 `[表情]` |
+| `qq.forwardMedia` | `true` | 群/私聊互转时用一条消息转发图片（文字在前、图片在后）。QQ 表情统一转为 `[表情]` |
+| `qq.mediaMode` | `"markdown"` | `markdown`：单条 Markdown 图文，图片先转存平台素材库换成 `qqbot-media://` 引用并带 `#宽px #高px`（QQ 客户端不带宽高只显示 `[图片]`），普通图片最长边 480px、纯表情贴纸 160px；`rich`：单条富媒体（图片在上、文字在下）。Markdown 上传或发送失败会自动退回 `rich` |
 | `qq.label` | `"QQ"` | 游戏内显示为 `[QQ] 昵称: 消息` |
 | `qq.server` | 全局 | 该适配器的入站默认服务器 |
 | `qq.maxLength` | `1500` | 单条出站上限，超出按此分片（官方上限约 4000） |
@@ -173,6 +174,7 @@ test/                       分类、存储、分发、桥、入站、QQ、配�
     "allowPrivate": false,
     "syncChannels": true,
     "forwardMedia": true,
+    "mediaMode": "markdown",
     "label": "QQ",
     "server": "survival"
   }
@@ -279,7 +281,7 @@ messages { "server": "survival", "limit": 20 }
 - **限流**：两次 OpenAPI 调用之间至少 `sendIntervalMs`；429/5xx 退避重试；`msg_id+msg_seq` 重复时换 seq 重发。
 - **去重**：入站按消息 id 记忆最近 1000 条，桥内核再按 `platform:id` 去重 10 分钟；重连后不会重复注入。
 - **过滤**：只接收 `qq.groups` 内的群与 `qq.privateUsers` 内的私聊；`allowedUsers` 可进一步收窄发言人；机器人自己的消息不会被回灌。
-- **群/私聊互通**：`qq.syncChannels`（默认 `true`）把一条 QQ 消息再发到除来源会话之外的所有目标：群里发的进私聊、私聊发的进群。消息带 `[群]` / `[私聊]` 前缀，来源会话跳过所以不会重复；机器人自己发的消息不触发入站事件，不会回环。图片（`qq.forwardMedia=true`）用**一条 Markdown 图文消息**转发：`[群] 昵称: 文字 ![图片](url)`，文字在前、图片在后；Markdown 发送失败时退回「标题文本 + 富媒体上传」。纯表情消息会把贴纸并进同一条 Markdown，不再额外补一条 `[表情]`；无贴纸可转发时显示 `[表情]` 文本。
+- **群/私聊互通**：`qq.syncChannels`（默认 `true`）把一条 QQ 消息再发到除来源会话之外的所有目标：群里发的进私聊、私聊发的进群。消息带 `[群]` / `[私聊]` 前缀，来源会话跳过所以不会重复；机器人自己发的消息不触发入站事件，不会回环。图片（`qq.forwardMedia=true`）用**一条消息**转发：`qq.mediaMode=markdown`（默认）先转存平台素材库，再发单条 Markdown 图文 `[群] 昵称: 文字 ![图片 #宽px #高px](qqbot-media://...)`，文字在前、图片在后，手机 QQ 也能显示（实验确认：Markdown 图片不带宽高时手机和电脑都只显示 `[图片]`）。普通图片按最长边 480px 等比缩小，纯表情贴纸按 160px 缩小，避免表情被放大；`rich` 发单条富媒体（图片在上、文字在下）。素材引用保留 90 天滑动有效，配额满 100 张时自动淘汰最旧的一半。Markdown 转存或发送失败会自动退回 `rich`。纯表情消息会把贴纸并进同一条消息，不再额外补一条 `[表情]`；无贴纸可转发时显示 `[表情]` 文本。
 - **注入安全**：`tellraw` 用 JSON 组件转义、`say` 用单行文本；两种方式都过滤控制字符，并在桥内核按注入文本做 60 秒回声抑制，避免「游戏 → QQ → 游戏」自激。注入成功时会在插件日志写一行 `[qq] 注入 <server>：[QQ] 昵称: 消息`，便于核对。
 - **注入方式与日志**：原版 Minecraft 只有 `say`/`me` 这类服务器广播会写进 `logs/latest.log`。因此「游戏内只有 `[QQ]` 标签」与「QQ 消息出现在服务器日志」不可兼得：默认 `injectMode="tellraw"` 保证单标签，但服务器日志里没有；改成 `injectMode="say"` 则日志可查，但游戏内会显示 `[Server] [QQ] ...`。
 

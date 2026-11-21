@@ -115,6 +115,23 @@ for (const required of ["manifest.json", "descriptor.json", "bin", "dist"]) {
 fs.rmSync(OUT, { recursive: true, force: true });
 copyDir(BUILD, OUT);
 
+// ---- 2.5 兼容旧宿主：裁掉描述符里的 setup --------------------------------
+// 本地 SDK（2026-11）会在 descriptor.json 里生成 `setup` 字段并写 schema=2，
+// 但当前 `mcsup` 宿主仍按 schema=1 解析，遇到 setup 会直接拒绝安装。
+// setup 只是安装向导的提示字段，裁掉不影响运行；等宿主升级后可移除这段。
+{
+  const descriptorPath = path.join(OUT, "descriptor.json");
+  const descriptor = JSON.parse(fs.readFileSync(descriptorPath, "utf8"));
+  if (descriptor.setup !== undefined) {
+    delete descriptor.setup;
+    if (descriptor.schema === 2) {
+      descriptor.schema = 1;
+    }
+    fs.writeFileSync(descriptorPath, `${JSON.stringify(descriptor)}\n`);
+    console.log("[stage] 已裁掉旧宿主不支持的 descriptor.setup（schema 降为 1）");
+  }
+}
+
 // ---- 3. 复制运行期依赖（真实目录，不带链接） -----------------------------
 for (const [name, entries] of RUNTIME_DEPS) {
   const resolved = path.join(ROOT, "node_modules", name);

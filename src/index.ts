@@ -106,12 +106,68 @@ function createGamePort(ctx: object, log: LogClient): GamePort | undefined {
 export const plugin = definePlugin({
   id: "chat-bridge",
   title: "聊天桥",
-  version: "0.1.12",
+  version: "0.1.15",
   license: "MIT",
   description: "采集 Minecraft 聊天与控制台消息，按可插拔平台分发，并支持平台消息回流游戏",
   resident: true,
   capabilities: ["events", "console:read", "console:write", "server:read"],
   config: configSchema,
+  // 安装向导：`mcsup plugin install` 会先列能力授权，再逐项问这些值，
+  // 写完后自动启用并启动，装完即可收发。只列「不填就用不了」的字段；
+  // 群/私聊 openid 可以留空，首条消息后从插件日志补。
+  setup: {
+    fields: [
+      {
+        path: "platforms",
+        required: true,
+        default: ["qq"],
+        label: "启用的平台",
+        description: "逗号分隔：QQ 官方机器人填 qq，本地日志填 log；默认 qq",
+      },
+      {
+        path: "injectMode",
+        required: true,
+        default: "tellraw",
+        label: "游戏内注入方式",
+        description:
+          "tellraw 只显示在游戏内；say 同时写入 logs/latest.log（游戏内客户端看不到），需要日志可见时选 say",
+      },
+      {
+        path: "qq.appId",
+        required: true,
+        label: "QQ AppID",
+        description: "QQ 开放平台 → 机器人管理端 → 开发设置",
+      },
+      {
+        path: "qq.clientSecret",
+        required: true,
+        secret: true,
+        label: "QQ ClientSecret",
+        description: "只用于换取 access_token，不会写入日志",
+      },
+      {
+        path: "qq.server",
+        label: "入站服务器",
+        description: "QQ 消息注入哪个服务器；留空自动选择",
+      },
+      {
+        path: "qq.groups",
+        label: "群 openid",
+        description:
+          "逗号分隔；首次可从 `mcsup plugin logs chat-bridge` 的入站日志获取，留空表示不限制群",
+      },
+      {
+        path: "qq.privateUsers",
+        label: "私聊 openid",
+        description: "逗号分隔；出站私聊目标，留空表示不主动私聊",
+      },
+      {
+        path: "qq.allowPrivate",
+        label: "接收私聊消息",
+        description: "是否把 QQ 私聊消息注入游戏；默认关闭，避免陌生人打扰",
+      },
+    ],
+  },
   subscriptions: [...SUBSCRIPTIONS],
 
   async onStart(ctx) {

@@ -27,6 +27,8 @@
  * 平台权限差异，不是适配器能绕过的。
  */
 
+import { createHash } from "node:crypto";
+
 import WebSocket from "ws";
 
 import { PluginError } from "mcsup-plugin";
@@ -67,6 +69,13 @@ export interface QqSettings {
   readonly syncChannels: boolean;
   /** 群/私聊互转时是否把图片重新上传并转发（默认开启） */
   readonly forwardMedia: boolean;
+  /**
+   * 图文镜像的消息形态：
+   * - `markdown`（默认）单条 Markdown 图文，图片先转存平台素材库换 `qqbot-media://` 引用，
+   *   手机端也能显示；失败自动退回 `rich`。
+   * - `rich` 单条富媒体（`msg_type=7`），图片在上、文字在下，兼容性最好。
+   */
+  readonly mediaMode: "markdown" | "rich";
   readonly label: string;
   readonly server?: string;
   readonly maxLength: number;
@@ -105,7 +114,7 @@ const INTENT_NAMES = Object.keys(INTENT_BITS) as IntentName[];
 const DEFAULT_API_BASE = "https://api.sgroup.qq.com";
 const SANDBOX_API_BASE = "https://sandbox.api.sgroup.qq.com";
 const DEFAULT_TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken";
-const USER_AGENT = "mcsup-chat-bridge/0.1.12 (QQBotAdapter)";
+const USER_AGENT = "mcsup-chat-bridge/0.1.15 (QQBotAdapter)";
 
 /** 出站队列上限：分发层之外再兜一层，避免重连期间无限堆积 */
 const OUTBOUND_LIMIT = 512;
@@ -190,6 +199,7 @@ export function parseQqSettings(raw: unknown): QqSettings {
     allowPrivate: boolOf(record["allowPrivate"], false),
     syncChannels: boolOf(record["syncChannels"], true),
     forwardMedia: boolOf(record["forwardMedia"], true),
+    mediaMode: record["mediaMode"] === "rich" ? "rich" : "markdown",
     label: stringOf(record["label"]) ?? "QQ",
     ...(server === undefined ? {} : { server }),
     maxLength: intOf(record["maxLength"], 1_500, 64, 4_000),
@@ -351,21 +361,45 @@ export function qqInboundImages(event: Record<string, unknown>): string[] {
 
 /**
  * 把文字里的 `[图片]` 占位换成 Markdown 图片，保证「文字在前、图片在后」且
- * 仍是同一条消息。QQ 官方群聊/单聊已对全部机器人开放自定义 Markdown，
- * 图片用公网 URL（入站附件的 QQ CDN 地址即可，平台会自行下载转存）。
+ * 仍是同一条消息。
+ *
+ * 实测（QQ 官方 API v2）：Markdown 图片**必须带 `#宽px #高px`**，否则手机 QQ
+ * 和电脑 QQ 都只显示 `[图片]` 占位、不加载图片。宽高从图片字节里解析，
+ * 超过上限时等比缩小，避免被客户端拉伸。
  */
-export function buildMediaMarkdown(text: string, images: readonly string[]): string {
+export function buildMediaMarkdown(
+  text: string,
+  images: readonly MediaMarkdownImage[],
+): string {
   let index = 0;
   let out = text.replace(/\[图片\]/g, () => {
-    const url = images[index];
+    const image = images[index];
     index += 1;
-    return url === undefined ? "[图片]" : `![图片](${url})`;
+    return image === undefined ? "[图片]" : markdownImageTag(image);
   });
   // 附件比占位多时（例如表情贴纸没有对应占位），补在末尾，避免丢图。
   for (; index < images.length; index += 1) {
-    out += ` ![图片](${images[index]})`;
+    const image = images[index];
+    if (image !== undefined) {
+      out += ` ${markdownImageTag(image)}`;
+    }
   }
   return out;
+}
+
+/** Markdown 图文里的单张图片：引用地址 + 客户端展示尺寸 */
+export interface MediaMarkdownImage {
+  readonly url: string;
+  readonly width?: number;
+  readonly height?: number;
+}
+
+function markdownImageTag(image: MediaMarkdownImage): string {
+  const size =
+    image.width !== undefined && image.height !== undefined
+      ? ` #${image.width}px #${image.height}px`
+      : "";
+  return `![图片${size}](${image.url})`;
 }
 
 // ---------------------------------------------------------------------------
@@ -390,10 +424,22 @@ interface PendingSend {
   readonly text: string;
   /** 需要跳过的目标（`kind:id`），用于群/私聊镜像时不回发来源会话 */
   readonly exclude?: string;
-  /** 需要随消息一起转发的图片 URL（Markdown 失败时退回富媒体上传） */
+  /**
+   * 需要随消息一起转发的图片 URL。发送时先转存平台素材库换成
+   * `qqbot-media://` 引用（Markdown 图文），失败再退回 `/files` 富媒体。
+   */
   readonly media?: readonly string[];
-  /** 已拼好的 Markdown 图文消息（文字在前、图片在后，作为单条消息发送） */
-  readonly markdown?: string;
+  /** Markdown 图片最长边上限；贴纸传更小的值，避免表情被放大 */
+  readonly mediaMaxPx?: number;
+}
+
+/** 平台素材库返回的图片引用（`qqbot-media://image/v1/...`） */
+interface MediaImageRef {
+  readonly url: string;
+  readonly imageId?: string;
+  /** 解析出的像素宽高；写进 Markdown 的 `#宽px #高px`，否则客户端不渲染图片 */
+  readonly width?: number;
+  readonly height?: number;
 }
 
 class QqApiError extends Error {
@@ -1045,7 +1091,11 @@ export class QqPlatform implements ChatPlatform {
       exclude,
       ...(images.length === 0
         ? {}
-        : { media: images, markdown: buildMediaMarkdown(caption, images) }),
+        : {
+            media: images,
+            // 纯表情消息里的图是贴纸：限制得更小，避免被当成大图展开
+            ...(faceOnly ? { mediaMaxPx: STICKER_MAX_DISPLAY_PX } : {}),
+          }),
     });
   }
 
@@ -1135,10 +1185,31 @@ export class QqPlatform implements ChatPlatform {
           continue;
         }
 
+        const media = pending.media ?? [];
+        // 先把图片转存到平台素材库（qqbot-media://），再拼单条 Markdown 图文。
+        // 任何一张失败就整体退回富媒体，避免一半 Markdown 一半富媒体的拼凑。
+        const uploaded: MediaImageRef[] = [];
+        let markdown: string | undefined;
+        if (media.length > 0 && this.settings.mediaMode === "markdown") {
+          let ready = true;
+          for (const url of media) {
+            try {
+              uploaded.push(await this.uploadMarkdownImage(url, pending.mediaMaxPx));
+            } catch (error) {
+              ready = false;
+              this.log.warn(`[qq] 图片转存平台素材库失败，退回富媒体：${errorText(error)}`);
+              break;
+            }
+          }
+          if (ready && uploaded.length === media.length) {
+            markdown = buildMediaMarkdown(text, uploaded);
+          }
+        }
+
         let failures = 0;
         for (const target of targets) {
           try {
-            await this.sendToTarget(target, text, pending.media, pending.markdown);
+            await this.sendToTarget(target, text, pending.media, markdown);
           } catch (error) {
             failures += 1;
             this.log.warn(`[qq] 发送到 ${target.kind}:${target.id} 失败：${errorText(error)}`);
@@ -1248,6 +1319,129 @@ export class QqPlatform implements ChatPlatform {
       throw new Error("上传接口未返回 file_info");
     }
     return fileInfo;
+  }
+
+  /**
+   * 把入站图片转存到 QQ 平台素材库，返回可写进 Markdown 的 `qqbot-media://` 引用。
+   *
+   * 手机 QQ 不会渲染指向外部公网 URL 的 Markdown 图片（只显示 `[图片]` 占位），
+   * 官方为此提供 `/v2/media-images/*`：先申请预签名 URL 直传，再 complete 换引用。
+   * 平台会在发送消息时转存图片副本，所以手机和电脑都能正常显示。
+   *
+   * 图片引用是滑动 90 天有效期、单机器人上限 100 张。发送后**不能立即删除**：
+   * 客户端加载图片仍依赖该引用，删早了会退回 `[图片]` 占位。正常靠 90 天
+   * 滑动过期自动回收；只有配额满（40035007）时才主动淘汰最旧的图片。
+   */
+  private async uploadMarkdownImage(
+    sourceUrl: string,
+    maxPx: number = MEDIA_IMAGE_MAX_DISPLAY_PX,
+  ): Promise<MediaImageRef> {
+    const response = await fetch(sourceUrl, {
+      signal: AbortSignal.timeout(this.settings.apiTimeoutMs),
+    });
+    if (!response.ok) {
+      throw new QqApiError(`下载源图片失败 [${response.status}]：${sourceUrl.slice(0, 120)}`, response.status);
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength === 0) {
+      throw new Error("源图片为空");
+    }
+    if (bytes.byteLength > MEDIA_IMAGE_MAX_BYTES) {
+      throw new Error(`源图片超过 10MB（${bytes.byteLength} 字节）`);
+    }
+    const contentType = imageContentTypeOf(response.headers.get("content-type"), sourceUrl);
+    const md5 = createHash("md5").update(bytes).digest("hex");
+    const sha1 = createHash("sha1").update(bytes).digest("hex");
+
+    await this.pace();
+    const prepareBody = {
+      file_name: `chat-bridge-${md5.slice(0, 12)}.${IMAGE_EXTENSIONS[contentType]}`,
+      file_size: bytes.byteLength,
+      content_type: contentType,
+      md5,
+      sha1,
+    };
+    let prepared: Record<string, unknown>;
+    try {
+      prepared = await this.apiRequest("POST", "/v2/media-images/prepare", prepareBody);
+    } catch (error) {
+      // 40035007：素材库满 100 张。清理最旧的一半后重试一次。
+      if (error instanceof QqApiError && error.code === MEDIA_QUOTA_CODE) {
+        const freed = await this.pruneMediaImages();
+        this.log.warn(`[qq] 素材库已满，清理 ${freed} 张旧图后重试`);
+        if (freed === 0) {
+          throw error;
+        }
+        prepared = await this.apiRequest("POST", "/v2/media-images/prepare", prepareBody);
+      } else {
+        throw error;
+      }
+    }
+    const uploadId = stringOf(prepared["upload_id"]);
+    const presignedUrl = stringOf(prepared["presigned_url"]);
+    if (uploadId === undefined || presignedUrl === undefined) {
+      throw new Error("素材上传申请缺少 upload_id / presigned_url");
+    }
+
+    const put = await fetch(presignedUrl, {
+      method: "PUT",
+      headers: { "Content-Type": contentType },
+      body: bytes,
+      signal: AbortSignal.timeout(this.settings.apiTimeoutMs),
+    });
+    if (!put.ok) {
+      throw new QqApiError(`素材直传失败 [${put.status}]`, put.status);
+    }
+    const etag = (put.headers.get("etag") ?? "").replace(/"/g, "").toLowerCase();
+    const completeMd5 = /^[0-9a-f]{32}$/.test(etag) ? etag : md5;
+
+    await this.pace();
+    const completed = await this.apiRequest("POST", "/v2/media-images/complete", {
+      upload_id: uploadId,
+      md5: completeMd5,
+    });
+    const reference = stringOf(completed["url"]);
+    if (reference === undefined) {
+      throw new Error("素材上传完成但未返回 qqbot-media 引用");
+    }
+    const imageId = stringOf(completed["image_id"]);
+    const { width, height } = imageSizeOf(bytes, contentType);
+    return {
+      url: reference,
+      ...(imageId === undefined ? {} : { imageId }),
+      ...clampImageSize(width, height, maxPx),
+    };
+  }
+
+  /**
+   * 素材库满额（100 张）时清理最旧的一半，给新图片腾位置。
+   *
+   * 图片引用是滑动 90 天有效期，正常不需要主动删；只有配额满时才做一次
+   * 淘汰。清理失败不阻塞发送，本次仍会抛回原始错误、退回富媒体。
+   */
+  private async pruneMediaImages(): Promise<number> {
+    const listed = await this.apiRequest("GET", "/v2/media-images");
+    const images = Array.isArray(listed["images"]) ? listed["images"] : [];
+    const items = images
+      .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
+      .map((item) => ({
+        id: stringOf(item["image_id"]),
+        createdAt: intOf(item["created_at"], 0, 0, Number.MAX_SAFE_INTEGER),
+      }))
+      .filter((item): item is { id: string; createdAt: number } => item.id !== undefined)
+      .sort((a, b) => a.createdAt - b.createdAt);
+    const drop = Math.max(1, Math.ceil(items.length / 2));
+    let removed = 0;
+    for (const item of items.slice(0, drop)) {
+      try {
+        await this.pace();
+        await this.apiRequest("DELETE", `/v2/media-images/${encodeURIComponent(item.id)}/delete`);
+        removed += 1;
+      } catch (error) {
+        this.log.warn(`[qq] 清理素材库旧图 ${item.id} 失败：${errorText(error)}`);
+      }
+    }
+    return removed;
   }
 
   private async sendChunk(
@@ -1546,6 +1740,127 @@ function urlOf(value: unknown): string | undefined {
 
 function boolOf(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
+}
+
+/** 平台素材库限制：单张图片不超过 10MB */
+const MEDIA_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+/** 素材库满额错误码 */
+const MEDIA_QUOTA_CODE = 40035007;
+/** Markdown 里展示的最长边（像素）；过大的图按比例缩小，避免被客户端拉伸 */
+const MEDIA_IMAGE_MAX_DISPLAY_PX = 480;
+/** 纯表情贴纸的最长边上限；表情图不能被放大成大图 */
+const STICKER_MAX_DISPLAY_PX = 160;
+const IMAGE_EXTENSIONS = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+} as const;
+
+type MarkdownImageType = keyof typeof IMAGE_EXTENSIONS;
+
+/**
+ * 从图片字节解析像素宽高。Markdown 图片不带 `#宽px #高px` 时 QQ 客户端
+ * （手机和电脑）只显示 `[图片]` 占位，所以这里必须尽量拿到真实尺寸。
+ */
+function imageSizeOf(
+  bytes: Uint8Array,
+  contentType: MarkdownImageType,
+): { width?: number; height?: number } {
+  try {
+    if (contentType === "image/png") {
+      if (bytes.length >= 24) {
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        return { width: view.getUint32(16), height: view.getUint32(20) };
+      }
+      return {};
+    }
+    if (contentType === "image/gif") {
+      if (bytes.length >= 10) {
+        return {
+          width: bytes[6]! | (bytes[7]! << 8),
+          height: bytes[8]! | (bytes[9]! << 8),
+        };
+      }
+      return {};
+    }
+    if (contentType === "image/jpeg") {
+      return jpegSizeOf(bytes);
+    }
+  } catch {
+    // 尺寸解析失败不影响发送，只是失去宽高提示
+  }
+  return {};
+}
+
+function jpegSizeOf(bytes: Uint8Array): { width?: number; height?: number } {
+  let offset = 2;
+  while (offset + 9 < bytes.length) {
+    if (bytes[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+    const marker = bytes[offset + 1]!;
+    if (marker === 0xd8 || marker === 0xd9 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      offset += 2;
+      continue;
+    }
+    const length = (bytes[offset + 2]! << 8) | bytes[offset + 3]!;
+    if (length < 2) {
+      return {};
+    }
+    const isStartOfFrame =
+      marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+    if (isStartOfFrame) {
+      return {
+        height: (bytes[offset + 5]! << 8) | bytes[offset + 6]!,
+        width: (bytes[offset + 7]! << 8) | bytes[offset + 8]!,
+      };
+    }
+    offset += 2 + length;
+  }
+  return {};
+}
+
+/** 等比缩放到展示上限，保留整数像素；拿不到尺寸就不写宽高 */
+function clampImageSize(
+  width: number | undefined,
+  height: number | undefined,
+  maxPx: number = MEDIA_IMAGE_MAX_DISPLAY_PX,
+): { width?: number; height?: number } {
+  if (width === undefined || height === undefined || width <= 0 || height <= 0) {
+    return {};
+  }
+  const scale = Math.min(1, maxPx / Math.max(width, height));
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
+}
+
+/**
+ * 归一化图片 MIME。部分 CDN 会返回 `image/jpg` 或 `application/octet-stream`，
+ * 平台只接受 png/jpeg/gif/webp，且扩展名必须与 Content-Type 一致。
+ */
+function imageContentTypeOf(value: string | null, url: string): MarkdownImageType {
+  const mime = (value ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+  if (mime === "image/jpg") {
+    return "image/jpeg";
+  }
+  if (mime in IMAGE_EXTENSIONS) {
+    return mime as MarkdownImageType;
+  }
+  const path = url.split("?")[0]?.toLowerCase() ?? "";
+  if (path.endsWith(".png")) {
+    return "image/png";
+  }
+  if (path.endsWith(".gif")) {
+    return "image/gif";
+  }
+  if (path.endsWith(".webp")) {
+    return "image/webp";
+  }
+  return "image/jpeg";
 }
 
 function intOf(value: unknown, fallback: number, min: number, max: number): number {

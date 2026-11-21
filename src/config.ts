@@ -184,7 +184,13 @@ export const configSchema = s.object({
           default: true,
           label: "同步图片",
           describe:
-            "为 true 时，群/私聊互转会用一条 Markdown 图文消息转发入站图片（文字在前、图片在后）；Markdown 失败自动退回标题文本 + 富媒体上传。QQ 表情统一转为 [表情] 文本",
+            "为 true 时，群/私聊互转会用一条消息转发入站图片（文字在前、图片在后）。QQ 表情统一转为 [表情] 文本",
+        }),
+        mediaMode: s.enum(["markdown", "rich"], {
+          default: "markdown",
+          label: "图片消息形态",
+          describe:
+            "markdown：单条 Markdown 图文，图片先转存平台素材库（qqbot-media://），手机/电脑都能显示；rich：单条富媒体（图片在上、文字在下），兼容性兜底。Markdown 上传或发送失败会自动退回 rich",
         }),
         label: s.string({
           default: "QQ",

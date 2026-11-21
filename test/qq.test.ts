@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { WebSocketServer, type WebSocket as WsSocket } from "ws";
 import type { LogClient } from "mcsup-plugin";
@@ -56,10 +57,20 @@ interface FakeQq {
   readonly posts: Array<{ path: string; body: Record<string, unknown>; auth: string | undefined }>;
   /** `/files` 富媒体上传请求 */
   readonly files: Array<{ path: string; body: Record<string, unknown> }>;
+  /** 素材库 prepare 请求 */
+  readonly mediaPrepares: Array<Record<string, unknown>>;
+  /** 素材库预签名直传（PUT） */
+  readonly mediaUploads: Array<{ path: string; contentType: string; md5: string; bytes: number }>;
+  /** 素材库删除请求路径 */
+  readonly mediaDeletes: string[];
+  /** 源图片下载次数 */
+  readonly imageFetches: () => number;
   /** 让下 N 次发消息返回指定错误码 */
   failNextWith(status: number, code?: number): void;
   /** 让下 N 次富媒体上传返回 400 */
   failNextFile(status: number): void;
+  /** 让下 N 次素材库 prepare 返回错误 */
+  failNextPrepare(status: number, code?: number): void;
   ready(): Promise<void>;
   dispatch(type: string, data: Record<string, unknown>, s?: number): void;
   /** 以指定关闭码断开当前 Gateway 连接 */
@@ -76,22 +87,107 @@ async function startFakeQq(options: FakeOptions): Promise<FakeQq> {
   const frames: FakeQq["frames"] = [];
   const posts: FakeQq["posts"] = [];
   const files: FakeQq["files"] = [];
+  const mediaPrepares: FakeQq["mediaPrepares"] = [];
+  const mediaUploads: FakeQq["mediaUploads"] = [];
+  const mediaDeletes: string[] = [];
   const sockets: WsSocket[] = [];
   let tokenCount = 0;
+  let imageFetches = 0;
   const forcedFailures: Array<{ status: number; code: number }> = [];
   const fileFailures: number[] = [];
+  const prepareFailures: Array<{ status: number; code: number }> = [];
+  // 1x1 PNG，够平台校验用；测试里只关心字节数和 MD5
+  const TEST_PNG = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  // 只有 PNG 头（IHDR 960x480），用于验证宽高解析与等比缩放
+  const WIDE_PNG = (() => {
+    const buffer = Buffer.alloc(33);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(buffer, 0);
+    buffer.writeUInt32BE(13, 8);
+    buffer.write("IHDR", 12, "ascii");
+    buffer.writeUInt32BE(960, 16);
+    buffer.writeUInt32BE(480, 20);
+    buffer[24] = 8;
+    buffer[25] = 2;
+    return buffer;
+  })();
 
   const http: Server = createServer((request, response) => {
     const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer) => chunks.push(chunk));
     request.on("end", () => {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
-      const raw = Buffer.concat(chunks).toString("utf8");
-      const body = raw === "" ? {} : (JSON.parse(raw) as Record<string, unknown>);
-      const send = (status: number, payload: unknown): void => {
-        response.writeHead(status, { "content-type": "application/json" });
+      const raw = Buffer.concat(chunks);
+      const contentType = request.headers["content-type"] ?? "";
+      const isJson = contentType.includes("application/json");
+      const body =
+        isJson && raw.length > 0
+          ? (JSON.parse(raw.toString("utf8")) as Record<string, unknown>)
+          : ({} as Record<string, unknown>);
+      const send = (status: number, payload: unknown, headers: Record<string, string> = {}): void => {
+        response.writeHead(status, { "content-type": "application/json", ...headers });
         response.end(JSON.stringify(payload));
       };
+
+      if (url.pathname.startsWith("/images/")) {
+        imageFetches += 1;
+        response.writeHead(200, { "content-type": "image/png" });
+        response.end(url.pathname === "/images/wide.png" ? WIDE_PNG : TEST_PNG);
+        return;
+      }
+
+      if (request.method === "PUT" && url.pathname.startsWith("/upload/")) {
+        const md5 = createHash("md5").update(raw).digest("hex");
+        mediaUploads.push({ path: url.pathname, contentType, md5, bytes: raw.length });
+        send(200, {}, { etag: `"${md5}"` });
+        return;
+      }
+
+      if (url.pathname === "/v2/media-images/prepare") {
+        const forced = prepareFailures.shift();
+        if (forced !== undefined) {
+          send(forced.status, { code: forced.code, message: "prepare failed" });
+          return;
+        }
+        mediaPrepares.push(body);
+        const uploadId = `upload-${mediaPrepares.length}`;
+        send(200, {
+          upload_id: uploadId,
+          presigned_url: `http://${request.headers.host ?? "127.0.0.1"}/upload/${uploadId}`,
+          expires_in: 3_600,
+        });
+        return;
+      }
+
+      if (url.pathname === "/v2/media-images/complete") {
+        const uploadId = typeof body["upload_id"] === "string" ? body["upload_id"] : "upload-1";
+        send(200, {
+          image_id: `img-${uploadId}`,
+          url: `qqbot-media://image/v1/${uploadId}`,
+          ttl: 7_776_000,
+        });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/v2/media-images") {
+        send(200, {
+          images: [
+            { image_id: "old-1", url: "qqbot-media://image/v1/old-1", created_at: 1, expires_at: 9 },
+            { image_id: "old-2", url: "qqbot-media://image/v1/old-2", created_at: 2, expires_at: 9 },
+          ],
+          next_cursor: "",
+          total: 2,
+        });
+        return;
+      }
+
+      if (request.method === "DELETE" && url.pathname.startsWith("/v2/media-images/")) {
+        mediaDeletes.push(url.pathname);
+        send(200, {});
+        return;
+      }
 
       if (url.pathname === "/token") {
         if (body["appId"] !== options.appId || body["clientSecret"] !== options.clientSecret) {
@@ -159,11 +255,18 @@ async function startFakeQq(options: FakeOptions): Promise<FakeQq> {
     frames,
     posts,
     files,
+    mediaPrepares,
+    mediaUploads,
+    mediaDeletes,
+    imageFetches: () => imageFetches,
     failNextWith(status, code = 11244) {
       forcedFailures.push({ status, code });
     },
     failNextFile(status) {
       fileFailures.push(status);
+    },
+    failNextPrepare(status, code = 40035006) {
+      prepareFailures.push({ status, code });
     },
     async ready() {
       await waitFor(() => frames.some((frame) => frame["op"] === 2), "Identify 帧");
@@ -244,6 +347,7 @@ describe("QQ 配置", () => {
     expect(settings.allowPrivate).toBe(false);
     expect(settings.syncChannels).toBe(true);
     expect(settings.forwardMedia).toBe(true);
+    expect(settings.mediaMode).toBe("markdown");
     expect(settings.markdown).toBe(false);
     expect(settings.passiveReply).toBe(true);
     expect(settings.label).toBe("QQ");
@@ -346,14 +450,14 @@ describe("QQ 消息格式", () => {
     ).toEqual(["https://cdn.test/a.png"]);
   });
 
-  it("Markdown 图文把文字放在图片前，多余图片补在末尾", () => {
-    expect(buildMediaMarkdown("[群] 小A: 看图 [图片]", ["https://cdn.test/a.png"])).toBe(
-      "[群] 小A: 看图 ![图片](https://cdn.test/a.png)",
-    );
-    expect(buildMediaMarkdown("纯图 [图片]", ["u1", "u2"])).toBe(
+  it("Markdown 图文把文字放在图片前，并带上宽高提示", () => {
+    expect(
+      buildMediaMarkdown("[群] 小A: 看图 [图片]", [{ url: "u1", width: 208, height: 320 }]),
+    ).toBe("[群] 小A: 看图 ![图片 #208px #320px](u1)");
+    expect(buildMediaMarkdown("纯图 [图片]", [{ url: "u1" }, { url: "u2" }])).toBe(
       "纯图 ![图片](u1) ![图片](u2)",
     );
-    expect(buildMediaMarkdown("没有占位", ["u1"])).toBe("没有占位 ![图片](u1)");
+    expect(buildMediaMarkdown("没有占位", [{ url: "u1" }])).toBe("没有占位 ![图片](u1)");
   });
 
   it("引用消息取被引用正文", () => {
@@ -512,7 +616,7 @@ describe("QQ 适配器（假官方 Gateway + REST）", () => {
     expect(fake.posts.some((post) => post.path === "/v2/groups/g1/messages")).toBe(false);
   });
 
-  it("群消息里的图片以单条 Markdown 图文私聊转发，文字在前", async () => {
+  it("群消息里的图片先转存素材库，再以单条 Markdown 图文私聊转发", async () => {
     const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
     cleanup.push(() => fake.close());
     const inbound: PlatformInboundMessage[] = [];
@@ -523,22 +627,58 @@ describe("QQ 适配器（假官方 Gateway + REST）", () => {
       id: "g-img-1",
       group_openid: "g1",
       content: "看图",
-      attachments: [{ content_type: "image/png", url: "https://cdn.test/a.png" }],
+      attachments: [{ content_type: "image/png", url: `${fake.apiBase}/images/a.png` }],
       author: { member_openid: "u1", member_nickname: "小A" },
     });
     await waitFor(() => inbound.length === 1, "群图片入站");
     expect(inbound[0]?.text).toBe("看图 [图片]");
     await waitFor(() => fake.posts.length >= 1, "转发图片");
 
-    // 单条 Markdown：文字在前、图片在后；不需要 /files 上传
+    // 先下载源图 → prepare → PUT → complete，换 qqbot-media:// 引用
+    expect(fake.imageFetches()).toBe(1);
+    expect(fake.mediaPrepares).toHaveLength(1);
+    expect(fake.mediaPrepares[0]).toMatchObject({ content_type: "image/png" });
+    expect(fake.mediaUploads).toHaveLength(1);
+    expect(fake.mediaUploads[0]?.contentType).toBe("image/png");
+    // 单条 Markdown：文字在前、图片在后；不需要 /files 富媒体上传
     expect(fake.files).toHaveLength(0);
     expect(fake.posts).toHaveLength(1);
     expect(fake.posts[0]?.path).toBe("/v2/users/u1/messages");
     expect(fake.posts[0]?.body).toMatchObject({
       msg_type: 2,
-      markdown: { content: "[群] 小A: 看图 ![图片](https://cdn.test/a.png)" },
+      markdown: {
+        content: "[群] 小A: 看图 ![图片 #1px #1px](qqbot-media://image/v1/upload-1)",
+      },
     });
     expect(fake.posts.some((post) => post.path === "/v2/groups/g1/messages")).toBe(false);
+    // 图片引用要保留：删早了客户端会退回 [图片] 占位
+    expect(fake.mediaDeletes).toHaveLength(0);
+  });
+
+  it("Markdown 图片带上按比例缩放后的宽高提示", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    startPlatform(fake, { groups: ["g1"], allowPrivate: true, privateUsers: ["u1"] }, inbound);
+    await fake.ready();
+
+    fake.dispatch("GROUP_AT_MESSAGE_CREATE", {
+      id: "g-img-wide",
+      group_openid: "g1",
+      content: "看图",
+      attachments: [{ content_type: "image/png", url: `${fake.apiBase}/images/wide.png` }],
+      author: { member_openid: "u1", member_nickname: "小A" },
+    });
+    await waitFor(() => inbound.length === 1, "群图片入站");
+    await waitFor(() => fake.posts.length >= 1, "转发图片");
+
+    // 960x480 等比缩到最长边 480：480x240
+    expect(fake.posts[0]?.body).toMatchObject({
+      msg_type: 2,
+      markdown: {
+        content: "[群] 小A: 看图 ![图片 #480px #240px](qqbot-media://image/v1/upload-1)",
+      },
+    });
   });
 
   it("纯表情消息把贴纸并进同一条 Markdown 消息，不再补 [表情] 占位", async () => {
@@ -552,7 +692,7 @@ describe("QQ 适配器（假官方 Gateway + REST）", () => {
       id: "g-face-1",
       group_openid: "g1",
       content: '<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">',
-      attachments: [{ content_type: "image/png", url: "https://cdn.test/face.png" }],
+      attachments: [{ content_type: "image/png", url: `${fake.apiBase}/images/face.png` }],
       author: { member_openid: "u1", member_nickname: "小A" },
     });
     await waitFor(() => inbound.length === 1, "群表情入站");
@@ -562,7 +702,7 @@ describe("QQ 适配器（假官方 Gateway + REST）", () => {
     expect(fake.posts).toHaveLength(1);
     expect(fake.posts[0]?.body).toMatchObject({
       msg_type: 2,
-      markdown: { content: "[群] 小A: ![图片](https://cdn.test/face.png)" },
+      markdown: { content: "[群] 小A: ![图片 #1px #1px](qqbot-media://image/v1/upload-1)" },
     });
   });
 
@@ -603,7 +743,7 @@ describe("QQ 适配器（假官方 Gateway + REST）", () => {
       id: "g-img-3",
       group_openid: "g1",
       content: "看图",
-      attachments: [{ content_type: "image/png", url: "https://cdn.test/a.png" }],
+      attachments: [{ content_type: "image/png", url: `${fake.apiBase}/images/a.png` }],
       author: { member_openid: "u1", member_nickname: "小A" },
     });
     await waitFor(() => inbound.length === 1, "群图片入站");
@@ -613,6 +753,118 @@ describe("QQ 适配器（假官方 Gateway + REST）", () => {
     expect(fake.posts[0]?.body["msg_type"]).toBe(2);
     expect(fake.posts[1]?.body).toMatchObject({ msg_type: 0, content: "[群] 小A: 看图" });
     expect(fake.posts[2]?.body).toMatchObject({ msg_type: 7, media: { file_info: "fi-1" } });
+  });
+
+  it("素材库 prepare 失败时直接退回富媒体", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    startPlatform(fake, { groups: ["g1"], allowPrivate: true, privateUsers: ["u1"] }, inbound);
+    await fake.ready();
+    fake.failNextPrepare(400);
+
+    fake.dispatch("GROUP_AT_MESSAGE_CREATE", {
+      id: "g-img-4",
+      group_openid: "g1",
+      content: "看图",
+      attachments: [{ content_type: "image/png", url: `${fake.apiBase}/images/a.png` }],
+      author: { member_openid: "u1", member_nickname: "小A" },
+    });
+    await waitFor(() => inbound.length === 1, "群图片入站");
+    await waitFor(() => fake.files.length === 1 && fake.posts.length >= 2, "退回富媒体");
+
+    expect(fake.mediaPrepares).toHaveLength(0);
+    expect(fake.posts).toHaveLength(2);
+    expect(fake.posts[0]?.body).toMatchObject({ msg_type: 0, content: "[群] 小A: 看图" });
+    expect(fake.posts[1]?.body).toMatchObject({ msg_type: 7, media: { file_info: "fi-1" } });
+    expect(fake.mediaDeletes).toHaveLength(0);
+  });
+
+  it("素材库满额时清理旧图后重试", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    startPlatform(fake, { groups: ["g1"], allowPrivate: true, privateUsers: ["u1"] }, inbound);
+    await fake.ready();
+    fake.failNextPrepare(400, 40035007);
+
+    fake.dispatch("GROUP_AT_MESSAGE_CREATE", {
+      id: "g-img-6",
+      group_openid: "g1",
+      content: "看图",
+      attachments: [{ content_type: "image/png", url: `${fake.apiBase}/images/a.png` }],
+      author: { member_openid: "u1", member_nickname: "小A" },
+    });
+    await waitFor(() => inbound.length === 1, "群图片入站");
+    await waitFor(() => fake.posts.length >= 1, "转发图片");
+
+    expect(fake.mediaDeletes).toEqual(["/v2/media-images/old-1/delete"]);
+    expect(fake.mediaPrepares).toHaveLength(1);
+    expect(fake.posts[0]?.body).toMatchObject({
+      msg_type: 2,
+      markdown: {
+        content: "[群] 小A: 看图 ![图片 #1px #1px](qqbot-media://image/v1/upload-1)",
+      },
+    });
+  });
+
+  it("纯表情贴纸按 160px 上限缩放，避免被放大", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    startPlatform(fake, { groups: ["g1"], allowPrivate: true, privateUsers: ["u1"] }, inbound);
+    await fake.ready();
+
+    fake.dispatch("GROUP_AT_MESSAGE_CREATE", {
+      id: "g-face-wide",
+      group_openid: "g1",
+      content: '<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">',
+      attachments: [{ content_type: "image/png", url: `${fake.apiBase}/images/wide.png` }],
+      author: { member_openid: "u1", member_nickname: "小A" },
+    });
+    await waitFor(() => inbound.length === 1, "群表情入站");
+    await waitFor(() => fake.posts.length >= 1, "转发表情");
+
+    // 960x480 贴纸按最长边 160 等比缩放：160x80
+    expect(fake.posts[0]?.body).toMatchObject({
+      msg_type: 2,
+      markdown: {
+        content: "[群] 小A: ![图片 #160px #80px](qqbot-media://image/v1/upload-1)",
+      },
+    });
+  });
+
+  it("mediaMode=rich 时跳素材库，直接发单条富媒体", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    startPlatform(
+      fake,
+      {
+        groups: ["g1"],
+        allowPrivate: true,
+        privateUsers: ["u1"],
+        mediaMode: "rich",
+      },
+      inbound,
+    );
+    await fake.ready();
+
+    fake.dispatch("GROUP_AT_MESSAGE_CREATE", {
+      id: "g-img-5",
+      group_openid: "g1",
+      content: "看图",
+      attachments: [{ content_type: "image/png", url: `${fake.apiBase}/images/a.png` }],
+      author: { member_openid: "u1", member_nickname: "小A" },
+    });
+    await waitFor(() => inbound.length === 1, "群图片入站");
+    await waitFor(() => fake.files.length === 1 && fake.posts.length >= 2, "转发富媒体");
+
+    expect(fake.imageFetches()).toBe(0);
+    expect(fake.mediaPrepares).toHaveLength(0);
+    // 富媒体卡片会把 content 渲染在图片之后：先发标题文本，再发图片
+    expect(fake.posts[0]?.body).toMatchObject({ msg_type: 0, content: "[群] 小A: 看图" });
+    expect(fake.posts[1]?.body).toMatchObject({ msg_type: 7, media: { file_info: "fi-1" } });
   });
 
   it("私聊消息镜像到群，且不回发来源私聊", async () => {

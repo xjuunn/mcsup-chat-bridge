@@ -65,11 +65,11 @@ export const configSchema = s.object({
     label: "入站文本上限",
     describe: "单条外部消息注入游戏前的最大字符数；超长会截断，避免撑爆聊天栏",
   }),
-  injectMode: s.enum(["tellraw", "say"], {
-    default: "tellraw",
+  injectMode: s.enum(["say", "tellraw"], {
+    default: "say",
     label: "注入方式",
     describe:
-      "tellraw（默认）：游戏里只有 [QQ] 标签，不写服务器日志；say：写进服务器 logs/latest.log，但游戏内会多出 [Server] 前缀。原版只有 say/me 这类服务器广播会进日志，两者不可兼得",
+      "say（默认）：游戏内广播并写入服务器 logs/latest.log，会多出 [Server] 前缀；tellraw：只显示在游戏内、不写日志，游戏里只有 [QQ] 标签。原版只有 say/me 这类服务器广播会进日志，两者不可兼得",
   }),
   log: s.optional(
     s.object(
@@ -295,7 +295,7 @@ export function resolveConfig(raw: RawConfig): BridgeConfig {
     queueCapacity: raw.queueCapacity ?? 256,
     inbound: raw.inbound ?? true,
     inboundMaxLength: raw.inboundMaxLength ?? 200,
-    injectMode: raw.injectMode ?? "tellraw",
+    injectMode: raw.injectMode ?? "say",
     ...(raw.inboundServer === undefined ? {} : { inboundServer: raw.inboundServer }),
     platformSettings,
   };

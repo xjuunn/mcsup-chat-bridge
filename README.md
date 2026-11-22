@@ -53,6 +53,9 @@ mcsup plugin install --from .\artifact
 3. 群 / 私聊 openid **不用填**：留空即全部（入站不限会话，出站发给收到过消息的
    会话）。需要限制范围时再用 `qq.groups` / `qq.privateUsers` 收窄；
 4. 写配置后自动启用并启动，成功后直接显示「已安装并启动」。
+5. 插件跟随 `qq.server` 选中的服务器启停：该服务器启动前先启动插件，停止后
+   插件随之停止（多台服务器共用同一个插件时，最后一台停止才停），日常只需
+   `mcsup server start / stop`。
 
 脚本或 CI 用 `--yes` 视为同意能力授权；`--no-setup` 跳过整个向导，
 回到旧行为（装完需手动 `grant` / `config set` / `enable` / `start`）。
@@ -146,7 +149,7 @@ test/                       分类、存储、分发、桥、入站、QQ、配�
 | `inbound` | `true` | 是否允许平台消息注入游戏；关闭后 QQ 仍可出站 |
 | `inboundServer` | 自动 | 入站默认服务器；省略时选运行中的服务器 |
 | `inboundMaxLength` | `200` | 单条入站文本上限（32–512），超长截断 |
-| `injectMode` | `"tellraw"` | 平台消息注入游戏的方式：`tellraw` 游戏里只有 `[QQ]` 标签但不写服务器日志；`say` 会写入 `logs/latest.log`，但游戏内多出 `[Server]` 前缀（原版只有 `say`/`me` 这类服务器广播会进日志） |
+| `injectMode` | `"say"` | 平台消息注入游戏的方式：`say` 会写入 `logs/latest.log`，但游戏内多出 `[Server]` 前缀；`tellraw` 游戏里只有 `[QQ]` 标签但不写服务器日志（原版只有 `say`/`me` 这类服务器广播会进日志） |
 | `log.prefix` | `"chat-bridge"` | 日志平台前缀 |
 | `log.level` | `"info"` | `info` / `debug` |
 | `qq.appId` | 无（必填） | QQ 开放平台机器人 AppID |
@@ -166,7 +169,7 @@ test/                       分类、存储、分发、桥、入站、QQ、配�
 | `qq.forwardMedia` | `true` | 群/私聊互转时用一条消息转发图片（文字在前、图片在后）。QQ 表情统一转为 `[表情]` |
 | `qq.mediaMode` | `"markdown"` | `markdown`：单条 Markdown 图文，图片先转存平台素材库换成 `qqbot-media://` 引用并带 `#宽px #高px`（QQ 客户端不带宽高只显示 `[图片]`），普通图片最长边 480px、纯表情贴纸 160px；`rich`：单条富媒体（图片在上、文字在下）。Markdown 上传或发送失败会自动退回 `rich` |
 | `qq.label` | `"QQ"` | 游戏内显示为 `[QQ] 昵称: 消息` |
-| `qq.server` | 全局 | 该适配器的入站默认服务器 |
+| `qq.server` | 全局 | 该适配器的入站默认服务器，同时决定插件跟随哪台服务器启停 |
 | `qq.maxLength` | `1500` | 单条出站上限，超出按此分片（官方上限约 4000） |
 | `qq.passiveReply` | `true` | 优先用最近入站消息的 `msg_id` 被动回复 |
 | `qq.passiveLimit` | `4` | 同一消息最多被动回复次数（群聊 5、管理员 50） |
@@ -302,7 +305,7 @@ messages { "server": "survival", "limit": 20 }
 | --- | --- | --- |
 | 游戏 → QQ | `[玩家名]:消息` | 玩家聊天严格使用此格式，例如 `[Steve]:你好` |
 | 游戏 → QQ（非聊天） | `[加入] Alex: Alex 加入了游戏` | 用中文类别标签，避免歧义 |
-| QQ → 游戏 | `[QQ] 昵称: 消息` | 通过 `injectMode` 注入（默认 `tellraw @a`，游戏内只有这一个标签）；可选 `qq.server` / `inboundServer` |
+| QQ → 游戏 | `[QQ] 昵称: 消息` | 通过 `injectMode` 注入（默认 `say`，游戏内会多出 `[Server]` 前缀；改成 `tellraw` 则只有单标签）；可选 `qq.server` / `inboundServer` |
 
 出站只发送纯文本（或显式开启的 Markdown），不拼任何平台标记；入站会把 `<@openid>` 映射成昵称、去掉机器人自身的 @，附件转为 `[图片]` / `[语音] ASR` / `[文件: 名称]` 占位文本。
 
@@ -316,7 +319,7 @@ messages { "server": "survival", "limit": 20 }
 - **过滤**：只接收 `qq.groups` 内的群与 `qq.privateUsers` 内的私聊；`allowedUsers` 可进一步收窄发言人；机器人自己的消息不会被回灌。
 - **群/私聊互通**：`qq.syncChannels`（默认 `true`）把一条 QQ 消息再发到除来源会话之外的所有目标：群里发的进私聊、私聊发的进群。消息带 `[群]` / `[私聊]` 前缀，来源会话跳过所以不会重复；机器人自己发的消息不触发入站事件，不会回环。图片（`qq.forwardMedia=true`）用**一条消息**转发：`qq.mediaMode=markdown`（默认）先转存平台素材库，再发单条 Markdown 图文 `[群] 昵称: 文字 ![图片 #宽px #高px](qqbot-media://...)`，文字在前、图片在后，手机 QQ 也能显示（实验确认：Markdown 图片不带宽高时手机和电脑都只显示 `[图片]`）。普通图片按最长边 480px 等比缩小，纯表情贴纸按 160px 缩小，避免表情被放大；`rich` 发单条富媒体（图片在上、文字在下）。素材引用保留 90 天滑动有效，配额满 100 张时自动淘汰最旧的一半。Markdown 转存或发送失败会自动退回 `rich`。纯表情消息会把贴纸并进同一条消息，不再额外补一条 `[表情]`；无贴纸可转发时显示 `[表情]` 文本。
 - **注入安全**：`tellraw` 用 JSON 组件转义、`say` 用单行文本；两种方式都过滤控制字符，并在桥内核按注入文本做 60 秒回声抑制，避免「游戏 → QQ → 游戏」自激。注入成功时会在插件日志写一行 `[qq] 注入 <server>：[QQ] 昵称: 消息`，便于核对。
-- **注入方式与日志**：原版 Minecraft 只有 `say`/`me` 这类服务器广播会写进 `logs/latest.log`。因此「游戏内只有 `[QQ]` 标签」与「QQ 消息出现在服务器日志」不可兼得：默认 `injectMode="tellraw"` 保证单标签，但服务器日志里没有；改成 `injectMode="say"` 则日志可查，但游戏内会显示 `[Server] [QQ] ...`。
+- **注入方式与日志**：原版 Minecraft 只有 `say`/`me` 这类服务器广播会写进 `logs/latest.log`。因此「游戏内只有 `[QQ]` 标签」与「QQ 消息出现在服务器日志」不可兼得：默认 `injectMode="say"` 让日志可查，但游戏内会显示 `[Server] [QQ] ...`；改成 `injectMode="tellraw"` 则只有单标签，服务器日志里没有。
 
 ### 官方频控（不可绕过）
 

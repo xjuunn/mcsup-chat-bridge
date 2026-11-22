@@ -76,7 +76,7 @@ function createGamePort(ctx: object, log: LogClient): GamePort | undefined {
   const servers = caps["server:read"]?.servers;
 
   return {
-    async sendChat(server: string, text: string, mode: InjectMode = "tellraw"): Promise<void> {
+    async sendChat(server: string, text: string, mode: InjectMode = "say"): Promise<void> {
       const clean = text.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
       if (clean === "") {
         return;
@@ -106,12 +106,15 @@ function createGamePort(ctx: object, log: LogClient): GamePort | undefined {
 export const plugin = definePlugin({
   id: "chat-bridge",
   title: "聊天桥",
-  version: "0.1.19",
+  version: "0.1.20",
   license: "MIT",
   description: "采集 Minecraft 聊天与控制台消息，按可插拔平台分发，并支持平台消息回流游戏",
   resident: true,
   capabilities: ["events", "console:read", "console:write", "server:read"],
   config: configSchema,
+  // 服务器绑定：`qq.server` 是「QQ 消息注入哪台服务器」，宿主据此让插件
+  // 跟随服务器启停——绑定的服务器启动前先拉起插件，全部停止后再收掉。
+  bind: { servers: ["qq.server"] },
   // 安装向导：`mcsup plugin install` 会先列能力授权，再逐项问这些值，
   // 写完后自动启用并启动，装完即可收发。只列「不填就用不了」的字段；
   // 群/私聊 openid 可以留空，首条消息后从插件日志补。
@@ -128,10 +131,10 @@ export const plugin = definePlugin({
       {
         path: "injectMode",
         required: true,
-        default: "tellraw",
+        default: "say",
         label: "游戏内注入方式",
         description:
-          "tellraw 只显示在游戏内；say 同时写入 logs/latest.log（游戏内客户端看不到），需要日志可见时选 say",
+          "say（默认）：写入 logs/latest.log，游戏内会多出 [Server] 前缀；tellraw：只显示在游戏内、不写日志，游戏里只有 [QQ] 标签",
       },
       {
         path: "qq.appId",

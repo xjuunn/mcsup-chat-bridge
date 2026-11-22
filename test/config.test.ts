@@ -61,7 +61,7 @@ describe("配置解析", () => {
     const defaults = resolveConfig(parse({}));
     expect(defaults.inbound).toBe(true);
     expect(defaults.inboundMaxLength).toBe(200);
-    expect(defaults.injectMode).toBe("tellraw");
+    expect(defaults.injectMode).toBe("say");
     const custom = resolveConfig(parse({ inbound: false, inboundServer: "creative", inboundMaxLength: 64, injectMode: "say" }));
     expect(custom.inbound).toBe(false);
     expect(custom.inboundServer).toBe("creative");

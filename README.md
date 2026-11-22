@@ -275,7 +275,15 @@ messages { "server": "survival", "limit": 20 }
 1. 在 [QQ 开放平台](https://q.qq.com/open) 创建机器人，取得 **AppID** 与 **ClientSecret**。
 2. 在机器人管理端配置事件订阅：群聊/单聊消息；如需频道能力，另开 `guilds` 等 intents。
 3. 把机器人拉进目标群，并取得群的 `group_openid` 填入 `qq.groups`；私聊对象用 `user_openid` 填入 `qq.privateUsers`。
-4. 官方机器人在群里**默认只能收到 @ 它的消息**。若要在群里看到全部聊天，需在开放平台开通“接收所有消息”（适配器会自动处理 `GROUP_MESSAGE_CREATE`）；注意该权限可能影响 @ 消息的投递方式。
+4. 官方机器人在群里**默认只能收到 @ 它的消息**（`GROUP_AT_MESSAGE_CREATE`）。群聊全量消息
+   `GROUP_MESSAGE_CREATE` 与它**同属 intent `1<<25`**，本插件的默认 intents
+   （`group_and_c2c`）已经覆盖，不需要改代码或加订阅。
+   开启方式：**群主**用最新版手机 QQ 打开该群 → 点机器人头像 → 右上角齿轮 →
+   把「机器人可获取的群聊消息范围」设为**获取群内全部消息**（部分管理端也叫
+   「接收所有消息」）。开启后群内每条消息都会推送，未 @ 的消息同样注入游戏。
+   注意：手机 QQ 版本过旧只支持私聊，看不到该设置项。
+   机器人自己的发言（`author.bot=true`）会被丢弃，不会来回自激；嫌吵可用
+   `qq.allowedUsers` 只放行指定发言人。
 
 ### 协议链路
 

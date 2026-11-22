@@ -106,7 +106,7 @@ function createGamePort(ctx: object, log: LogClient): GamePort | undefined {
 export const plugin = definePlugin({
   id: "chat-bridge",
   title: "聊天桥",
-  version: "0.1.17",
+  version: "0.1.18",
   license: "MIT",
   description: "采集 Minecraft 聊天与控制台消息，按可插拔平台分发，并支持平台消息回流游戏",
   resident: true,
@@ -157,12 +157,12 @@ export const plugin = definePlugin({
         path: "qq.groups",
         label: "群 openid",
         description:
-          "逗号分隔；首次可从 `mcsup plugin logs chat-bridge` 的入站日志获取，留空表示不限制群",
+          "openid，不是 QQ 群号；逗号分隔；首次可从 `mcsup plugin logs chat-bridge` 的入站日志获取，留空表示不限制群",
       },
       {
         path: "qq.privateUsers",
         label: "私聊 openid",
-        description: "逗号分隔；出站私聊目标，留空表示不主动私聊",
+        description: "openid，不是 QQ 号；逗号分隔；出站私聊目标，留空表示不主动私聊",
       },
       {
         path: "qq.allowPrivate",

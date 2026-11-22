@@ -43,14 +43,16 @@ mcsup plugin install --from .\artifact
 
 1. 列出插件申请的权限（`events` / `console:read` / `console:write` / `server:read`），
    问一次 `授予以上权限？[Y/n]`，默认授予；
-2. 按插件 `setup` 声明逐项询问配置：
+2. 按插件 `setup` 声明逐项询问配置（每个问题只有一行，不带提示文本）：
    - `启用的平台` 是多选框：`■`/`□` 表示是否选中，空格切换、回车确认；
    - `游戏内注入方式` 是单选项；`入站服务器` 从已注册服务器中单选（必填），
      还没有服务器时才退回手输；
-   - `AppID`、`ClientSecret` 等输入框**不会预填旧值**，已有值时帮助行提示
-     「已设置；留空保持不变」，直接回车即沿用；密钥每输入一个字符显示一个 `*`；
+   - `AppID`、`ClientSecret` 等输入框**不会预填旧值**：留空即沿用，
+     密钥每输入一个字符显示一个 `*`；
    - 必填项没有旧值可沿用时不能回车跳过，会提示后重新提问（`Ctrl+C` 取消）；
-3. 写配置后自动启用并启动，成功后直接显示「已安装并启动」。
+3. 群 / 私聊 openid **不用填**：留空即全部（入站不限会话，出站发给收到过消息的
+   会话）。需要限制范围时再用 `qq.groups` / `qq.privateUsers` 收窄；
+4. 写配置后自动启用并启动，成功后直接显示「已安装并启动」。
 
 脚本或 CI 用 `--yes` 视为同意能力授权；`--no-setup` 跳过整个向导，
 回到旧行为（装完需手动 `grant` / `config set` / `enable` / `start`）。
@@ -154,8 +156,8 @@ test/                       分类、存储、分发、桥、入站、QQ、配�
 | `qq.tokenUrl` | 官方凭证地址 | `https://bots.qq.com/app/getAppAccessToken` |
 | `qq.intents` | `["group_and_c2c"]` | 事件订阅位；可选 `guilds` / `direct_message` / `interaction` 等 |
 | `qq.markdown` | `false` | 为 `true` 用 `msg_type=2` 发 Markdown；默认纯文本避免符号被渲染。群/私聊镜像的图片始终优先用 Markdown 图文，与此开关无关 |
-| `qq.groups` | `[]` | 出站 `group_openid`；同时是入站白名单 |
-| `qq.privateUsers` | `[]` | 出站私聊 `user_openid`（官方 API 用 openid，不是 QQ 号） |
+| `qq.groups` | `[]` | 出站 `group_openid`；同时是入站白名单。**留空 = 全部**：入站不限群，出站发给收到过消息的群 |
+| `qq.privateUsers` | `[]` | 出站私聊 `user_openid`。**留空 = 全部**：入站不限对象，出站发给给机器人发过消息的用户 |
 | `qq.allowedUsers` | `[]` | 非空时只允许这些 openid 进入游戏 |
 | `qq.categories` | 沿用全局 | QQ 出站类别过滤 |
 | `qq.inbound` | `true` | 是否把 QQ 消息注入游戏 |
@@ -274,7 +276,9 @@ messages { "server": "survival", "limit": 20 }
 
 1. 在 [QQ 开放平台](https://q.qq.com/open) 创建机器人，取得 **AppID** 与 **ClientSecret**。
 2. 在机器人管理端配置事件订阅：群聊/单聊消息；如需频道能力，另开 `guilds` 等 intents。
-3. 把机器人拉进目标群，并取得群的 `group_openid` 填入 `qq.groups`；私聊对象用 `user_openid` 填入 `qq.privateUsers`。
+3. 把机器人拉进目标群即可。**openid 不用手填**：`qq.groups` / `qq.privateUsers` 留空即全部
+   （入站不限会话，出站发给收到过消息的会话）；需要收窄范围时再填 `group_openid` /
+   `user_openid`（不是群号 / QQ 号，可从 `mcsup plugin logs chat-bridge` 的入站日志里取）。
 4. 官方机器人在群里**默认只能收到 @ 它的消息**（`GROUP_AT_MESSAGE_CREATE`）。群聊全量消息
    `GROUP_MESSAGE_CREATE` 与它**同属 intent `1<<25`**，本插件的默认 intents
    （`group_and_c2c`）已经覆盖，不需要改代码或加订阅。

@@ -493,6 +493,26 @@ describe("QQ 适配器（假官方 Gateway + REST）", () => {
     expect(fake.posts[0]?.body["msg_id"]).toBeUndefined();
   });
 
+  it("未配置 groups 时，出站自动发给收到过消息的群（默认全部）", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    const { platform } = startPlatform(fake, {}, inbound);
+    await fake.ready();
+
+    fake.dispatch("GROUP_MESSAGE_CREATE", {
+      id: "msg-auto-1",
+      group_openid: "gAuto",
+      content: "先来一条",
+      author: { member_openid: "u1", member_nickname: "小A" },
+    });
+    await waitFor(() => inbound.length === 1, "入站消息");
+
+    platform.deliver(message());
+    await waitFor(() => fake.posts.length === 1, "自动目标出站");
+    expect(fake.posts[0]?.path).toBe("/v2/groups/gAuto/messages");
+  });
+
   it("入站消息回流，并用 msg_id + 递增 msg_seq 被动回复", async () => {
     const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
     cleanup.push(() => fake.close());

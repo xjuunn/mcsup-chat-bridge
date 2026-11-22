@@ -120,6 +120,8 @@ const USER_AGENT = "mcsup-chat-bridge/0.1.15 (QQBotAdapter)";
 const OUTBOUND_LIMIT = 512;
 /** 已处理消息 id 的记忆上限，用于抵御平台重发 */
 const SEEN_LIMIT = 1_000;
+/** 留空配置时自动记住的会话上限（群 / 私聊各自） */
+const LEARNED_LIMIT = 64;
 /** 单次出站失败后的重试次数（首次 + 2 次重试） */
 const SEND_ATTEMPTS = 3;
 /** 被动回复失效后允许的兜底主动消息；官方频控较严，失败只记日志 */
@@ -486,6 +488,12 @@ export class QqPlatform implements ChatPlatform {
   private readonly seqs = new Map<string, number>();
   /** 被过滤丢弃的会话只告警一次，避免刷屏；键为 `kind:id` */
   private readonly warnedDrops = new Set<string>();
+  /**
+   * 未显式配置 `groups` / `privateUsers` 时，出站目标取「收到过消息的会话」。
+   * 这样默认即全部：不用抄 openid 也能把游戏消息发回群里 / 私聊。
+   */
+  private readonly learnedGroups = new Set<string>();
+  private readonly learnedUsers = new Set<string>();
 
   public constructor(options: PlatformCreateOptions) {
     this.log = options.log;
@@ -991,7 +999,7 @@ export class QqPlatform implements ChatPlatform {
           isGroup,
           channelId,
           authorId,
-          "私聊未启用（qq.allowPrivate=false）；如需接收，把该 user_openid 填进 qq.privateUsers 并设 allowPrivate=true",
+          "私聊未启用（qq.allowPrivate=false）；如需接收私聊，把 qq.allowPrivate 设为 true",
         );
         return;
       }
@@ -1007,9 +1015,10 @@ export class QqPlatform implements ChatPlatform {
       stringOf(author["nickname"]) ??
       authorId;
 
-    // 首次见到某个会话时打一条 info，OpenID 只能从事件里拿到，用户据此填写
-    // qq.groups / qq.privateUsers；同一会话只打一次，不刷屏。
+    // 首次见到某个会话时打一条 info；同时记进出站目标，留空配置时也能发回这里。
+    // 同一会话只打一次，不刷屏。
     const channelKey = `${isGroup ? "group" : "private"}:${channelId}`;
+    this.learnChannel(isGroup, channelId);
     if (!this.warnedDrops.has(`seen:${channelKey}`)) {
       this.warnedDrops.add(`seen:${channelKey}`);
       this.log.info(
@@ -1099,6 +1108,21 @@ export class QqPlatform implements ChatPlatform {
     });
   }
 
+  /** 记住会话，作为留空配置时的出站目标；超上限丢最早的 */
+  private learnChannel(isGroup: boolean, channelId: string): void {
+    const set = isGroup ? this.learnedGroups : this.learnedUsers;
+    if (set.has(channelId)) {
+      return;
+    }
+    set.add(channelId);
+    if (set.size > LEARNED_LIMIT) {
+      const oldest = set.values().next();
+      if (!oldest.done) {
+        set.delete(oldest.value);
+      }
+    }
+  }
+
   private rememberSeen(messageId: string): void {
     this.seen.set(messageId, Date.now());
     if (this.seen.size > SEEN_LIMIT) {
@@ -1149,11 +1173,15 @@ export class QqPlatform implements ChatPlatform {
   }
 
   private targets(): readonly OutboundTarget[] {
+    // 留空 = 全部：显式配置优先，否则发给收到过消息的会话（按首次出现顺序）。
+    const groups = this.settings.groups.length > 0 ? this.settings.groups : [...this.learnedGroups];
+    const users =
+      this.settings.privateUsers.length > 0 ? this.settings.privateUsers : [...this.learnedUsers];
     const targets: OutboundTarget[] = [];
-    for (const group of this.settings.groups) {
+    for (const group of groups) {
       targets.push({ kind: "group", id: group });
     }
-    for (const user of this.settings.privateUsers) {
+    for (const user of users) {
       targets.push({ kind: "private", id: user });
     }
     return targets;
@@ -1178,9 +1206,17 @@ export class QqPlatform implements ChatPlatform {
           (target) => pending.exclude !== targetKey(target.kind, target.id),
         );
         if (targets.length === 0) {
-          if (this.settings.groups.length + this.settings.privateUsers.length === 0 && !this.warnedNoTarget) {
+          // 会话列表为空（还没收到过任何消息）才是真的没有目标；
+          // 仅因 `exclude` 过滤掉唯一目标是正常情况，不告警。
+          const hasAny =
+            this.settings.groups.length +
+              this.settings.privateUsers.length +
+              this.learnedGroups.size +
+              this.learnedUsers.size >
+            0;
+          if (!hasAny && !this.warnedNoTarget) {
             this.warnedNoTarget = true;
-            this.log.warn("[qq] 未配置 groups / privateUsers，出站消息将被丢弃");
+            this.log.warn("[qq] 还没有可用的会话目标（等收到第一条群/私聊消息后自动补齐）");
           }
           continue;
         }

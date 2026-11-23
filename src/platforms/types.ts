@@ -13,13 +13,21 @@
 
 import type { LogClient } from "mcsup-plugin";
 
+import type { KvLike } from "../core/targets.js";
 import type { NormalizedMessage } from "../core/types.js";
 
-/** 创建适配器时的依赖：日志 + 配置里与适配器 id 同名的片段 */
+/** 创建适配器时的依赖：日志 + 配置里与适配器 id 同名的片段 + 宿主 KV */
 export interface PlatformCreateOptions {
   readonly log: LogClient;
   /** `config[<id>]`；未配置时为 undefined */
   readonly settings: unknown;
+  /**
+   * 宿主 `storage:kv`；未授予时为 undefined。
+   *
+   * 适配器用它记住「见过的会话」这类跨重启需要保留的小状态。缺省时退化为
+   * 进程内记忆，不阻塞启动。
+   */
+  readonly kv?: KvLike;
 }
 
 /** 入站消息的通道：群聊或私聊 */

@@ -22,6 +22,7 @@ import type {
 } from "../platforms/types.js";
 import { PlatformDispatcher, type PlatformStats } from "./dispatcher.js";
 import { MessageStore } from "./store.js";
+import type { KvLike } from "./targets.js";
 import type { MessageCategory, MessageDraft, MessageFilter, MessagePage } from "./types.js";
 
 /** 运行期配置（由 `config.ts` 从宿主配置解析而来） */
@@ -53,6 +54,13 @@ export interface BridgeOptions {
   readonly config: BridgeConfig;
   /** 游戏侧端口；未授予 `console:write` 时省略，入站会降级并计数 */
   readonly game?: GamePort;
+  /**
+   * 宿主 `storage:kv`；未授予时省略。
+   *
+   * 适配器用它把「见过的会话」等小状态存下来，让留空配置的出站目标跨重启
+   * 有效。缺省时适配器退化为进程内记忆。
+   */
+  readonly kv?: KvLike;
 }
 
 /** 入站统计 */
@@ -111,6 +119,7 @@ export class ChatBridge {
   private readonly registry: PlatformRegistry;
   private readonly store: MessageStore;
   private readonly game: GamePort | undefined;
+  private readonly kv: KvLike | undefined;
   private config: BridgeConfig;
   private dispatcher: PlatformDispatcher | undefined;
   private started = false;
@@ -143,6 +152,7 @@ export class ChatBridge {
     this.registry = options.registry;
     this.config = options.config;
     this.game = options.game;
+    this.kv = options.kv;
     this.store = new MessageStore(options.config.storeSize);
   }
 
@@ -327,7 +337,11 @@ export class ChatBridge {
 
   private buildDispatcher(config: BridgeConfig): PlatformDispatcher {
     const platforms: ChatPlatform[] = config.platforms.map((id) =>
-      this.registry.create(id, { log: this.log, settings: config.platformSettings[id] }),
+      this.registry.create(id, {
+        log: this.log,
+        settings: config.platformSettings[id],
+        ...(this.kv === undefined ? {} : { kv: this.kv }),
+      }),
     );
     return new PlatformDispatcher(platforms, {
       capacity: config.queueCapacity,

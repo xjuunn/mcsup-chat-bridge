@@ -68,6 +68,7 @@ describe("插件（MockHost 全链路）", () => {
       expect(hello.plugin_id).toBe("chat-bridge");
       expect(hello.requested).toEqual([
         "events",
+        "storage:kv",
         "console:read",
         "console:write",
         "server:read",

@@ -37,6 +37,7 @@ const descriptor = JSON.parse(readFileSync(path.join(buildDir, "descriptor.json"
 
 assert(manifest.id === "chat-bridge", `manifest.id 应为 chat-bridge，实际 ${manifest.id}`);
 assert(manifest.capabilities.includes("events"), "manifest 缺少 events 能力");
+assert(manifest.capabilities.includes("storage:kv"), "manifest 缺少 storage:kv 能力");
 assert(manifest.capabilities.includes("console:read"), "manifest 缺少 console:read 能力");
 assert(manifest.capabilities.includes("console:write"), "manifest 缺少 console:write 能力");
 assert(manifest.capabilities.includes("server:read"), "manifest 缺少 server:read 能力");
@@ -211,8 +212,18 @@ const hostCalls = [];
 // 宿主能力的返回形状由 SDK 按 `<capability>.<method>` 逐字段校验，形状不符会
 // 抛 `host returned an invalid ...`。这里照真宿主（`crates/plugin/src/api.rs`）
 // 的形状给，写能力是 `{ok:true}` 确认，读能力按文档结构返回。
+// 宿主 KV 的最小实现：值与真宿主一致，按 base64 原样存取
+const kvStore = new Map();
 const hostReplies = new Map([
   ["console:write/send_line", () => ({ ok: true })],
+  ["storage:kv/get", (input) => ({ value: kvStore.get(input?.key) ?? null })],
+  [
+    "storage:kv/set",
+    (input) => {
+      kvStore.set(input?.key, input?.value);
+      return { ok: true };
+    },
+  ],
   ["server:read/list", () => ({ servers: [{ name: "survival", status: "running", version: null }] })],
   ["console:read/tail", () => ({ lines: [], next: 0 })],
 ]);
@@ -266,7 +277,7 @@ socket.on("data", (chunk) => {
           });
           continue;
         }
-        send({ type: "result", id: frame.id, ok: true, output: reply() });
+        send({ type: "result", id: frame.id, ok: true, output: reply(frame.input) });
         continue;
       }
       frames.push(frame);
@@ -316,6 +327,7 @@ try {
   assert(hello.plugin_id === "chat-bridge", `hello.plugin_id 异常：${hello.plugin_id}`);
   assert(hello.api === 1, `hello.api 异常：${hello.api}`);
   assert(hello.requested.includes("events"), "hello 未申请 events");
+  assert(hello.requested.includes("storage:kv"), "hello 未申请 storage:kv");
   assert(hello.requested.includes("console:read"), "hello 未申请 console:read");
   assert(hello.requested.includes("console:write"), "hello 未申请 console:write");
   assert(hello.requested.includes("server:read"), "hello 未申请 server:read");
@@ -326,7 +338,7 @@ try {
     type: "welcome",
     session_id: "real-session-1",
     host_version: "0.0.0-test",
-    granted: ["events", "console:read", "console:write", "server:read"],
+    granted: ["events", "storage:kv", "console:read", "console:write", "server:read"],
     limits: {
       inflight: 8,
       frame_bytes: 1_048_576,
@@ -742,6 +754,17 @@ try {
     "console:write 只应调用 send_line 并带 line",
   );
   successCases.push("宿主调用只用到已声明的 console:write.send_line，返回确认被插件接受");
+
+  const kvCalls = hostCalls.filter((c) => c.capability === "storage:kv");
+  assert(
+    kvCalls.some((c) => c.method === "get" && typeof c.input?.key === "string"),
+    "插件应在启动时读取 storage:kv 里的出站目标记录",
+  );
+  assert(
+    kvCalls.some((c) => c.method === "set" && c.input?.key === "qq:targets"),
+    "插件应把见到的会话写回 storage:kv（键 qq:targets）",
+  );
+  successCases.push("出站目标记录经 storage:kv 读回与写回（键 qq:targets）");
 
   // ---- 退出 -------------------------------------------------------------
   send({ type: "shutdown", grace_ms: 2_000 });

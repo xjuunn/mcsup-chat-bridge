@@ -33,6 +33,7 @@ import WebSocket from "ws";
 
 import { PluginError } from "mcsup-plugin";
 import type { LogClient } from "mcsup-plugin";
+import { LearnedTargets } from "../core/targets.js";
 import { CATEGORIES } from "../core/types.js";
 import type { MessageCategory, NormalizedMessage } from "../core/types.js";
 import type {
@@ -482,6 +483,8 @@ export class QqPlatform implements ChatPlatform {
   private lastSendAt = 0;
   private sending = false;
   private warnedNoTarget = false;
+  /** 「私聊镜像发不到群」只告警一次，避免每条私聊都刷屏 */
+  private warnedNoMirror = false;
   private readonly outQueue: PendingSend[] = [];
   private readonly seen = new Map<string, number>();
   private readonly passive = new Map<string, PassiveEntry>();
@@ -491,14 +494,22 @@ export class QqPlatform implements ChatPlatform {
   /**
    * 未显式配置 `groups` / `privateUsers` 时，出站目标取「收到过消息的会话」。
    * 这样默认即全部：不用抄 openid 也能把游戏消息发回群里 / 私聊。
+   *
+   * 记录走宿主 `storage:kv`（`plugin-data/<id>/kv/`，按插件 id 划分，升级与
+   * 宿主重启后仍在），否则重启后群里没先说话之前，私聊镜像会无目标可发。
    */
-  private readonly learnedGroups = new Set<string>();
-  private readonly learnedUsers = new Set<string>();
+  private readonly learned: LearnedTargets;
 
   public constructor(options: PlatformCreateOptions) {
     this.log = options.log;
     this.settings = parseQqSettings(options.settings);
     this.backoff = this.settings.reconnectMinMs;
+    this.learned = new LearnedTargets({
+      key: "qq:targets",
+      log: options.log,
+      limit: LEARNED_LIMIT,
+      ...(options.kv === undefined ? {} : { kv: options.kv }),
+    });
   }
 
   public start(ctx: PlatformContext): void {
@@ -552,6 +563,8 @@ export class QqPlatform implements ChatPlatform {
   // -------------------------------------------------------------------------
 
   private async run(): Promise<void> {
+    // 先恢复记住的会话，再连网关：入站消息一到就要能正确算出发给谁
+    await this.learned.load();
     while (!this.stopping) {
       if (this.fatal !== undefined) {
         this.log.error(`[qq] 已停止重连：${this.fatal}`);
@@ -1090,6 +1103,7 @@ export class QqPlatform implements ChatPlatform {
       (target) => targetKey(target.kind, target.id) !== exclude,
     );
     if (!hasOtherTarget) {
+      this.warnNoMirrorTarget(isGroup);
       return;
     }
     const shownText = faceOnly ? text.replace(/\[表情\]\s*/g, "").trim() : text;
@@ -1110,17 +1124,7 @@ export class QqPlatform implements ChatPlatform {
 
   /** 记住会话，作为留空配置时的出站目标；超上限丢最早的 */
   private learnChannel(isGroup: boolean, channelId: string): void {
-    const set = isGroup ? this.learnedGroups : this.learnedUsers;
-    if (set.has(channelId)) {
-      return;
-    }
-    set.add(channelId);
-    if (set.size > LEARNED_LIMIT) {
-      const oldest = set.values().next();
-      if (!oldest.done) {
-        set.delete(oldest.value);
-      }
-    }
+    this.learned.remember(isGroup ? "group" : "private", channelId);
   }
 
   private rememberSeen(messageId: string): void {
@@ -1172,11 +1176,39 @@ export class QqPlatform implements ChatPlatform {
     );
   }
 
+  /**
+   * 「镜像无处可发」时告警一次
+   *
+   * 群/私聊镜像的目标来自「见过的会话」，而群的 `group_openid` 只有在群里说过
+   * 话（或入群事件）之后才知道：`qq.groups` 留空时，群里还没开过口之前，私聊
+   * 消息往群里镜像算出来是零个目标。旧实现直接静默返回——用户只看到「群里不
+   * 同步」，日志里一个字都没有。这里说清缺什么、怎么补。
+   */
+  private warnNoMirrorTarget(isGroup: boolean): void {
+    if (this.warnedNoMirror || !this.settings.syncChannels) {
+      return;
+    }
+    // 缺目标只会发生在「私聊 → 群」：私聊目标随第一条私聊就有，群目标要等群开口
+    if (isGroup) {
+      return;
+    }
+    if (this.settings.groups.length > 0 || this.learned.groups().length > 0) {
+      return;
+    }
+    this.warnedNoMirror = true;
+    this.log.warn(
+      "[qq] 私聊镜像暂时发不到群：还没有记录到任何群会话（在群里发一条消息即可自动补齐，或把 qq.groups 填成群 openid）",
+    );
+  }
+
   private targets(): readonly OutboundTarget[] {
     // 留空 = 全部：显式配置优先，否则发给收到过消息的会话（按首次出现顺序）。
-    const groups = this.settings.groups.length > 0 ? this.settings.groups : [...this.learnedGroups];
+    const groups =
+      this.settings.groups.length > 0 ? this.settings.groups : this.learned.groups();
     const users =
-      this.settings.privateUsers.length > 0 ? this.settings.privateUsers : [...this.learnedUsers];
+      this.settings.privateUsers.length > 0
+        ? this.settings.privateUsers
+        : this.learned.users();
     const targets: OutboundTarget[] = [];
     for (const group of groups) {
       targets.push({ kind: "group", id: group });
@@ -1211,8 +1243,7 @@ export class QqPlatform implements ChatPlatform {
           const hasAny =
             this.settings.groups.length +
               this.settings.privateUsers.length +
-              this.learnedGroups.size +
-              this.learnedUsers.size >
+              this.learned.size >
             0;
           if (!hasAny && !this.warnedNoTarget) {
             this.warnedNoTarget = true;

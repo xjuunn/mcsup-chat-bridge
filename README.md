@@ -43,7 +43,7 @@ mcsup plugin install --from .\build
 
 安装会一次走完整个向导，装完即用：
 
-1. 列出插件申请的权限（`events` / `console:read` / `console:write` / `server:read`），
+1. 列出插件申请的权限（`events` / `storage:kv` / `console:read` / `console:write` / `server:read`），
    问一次 `授予以上权限？[Y/n]`，默认授予；
 2. 按插件 `setup` 声明逐项询问配置（每个问题只有一行，不带提示文本）：
    - `启用的平台` 是多选框：`■`/`□` 表示是否选中，空格切换、回车确认；
@@ -53,7 +53,8 @@ mcsup plugin install --from .\build
      密钥每输入一个字符显示一个 `*`；
    - 必填项没有旧值可沿用时不能回车跳过，会提示后重新提问（`Ctrl+C` 取消）；
 3. 群 / 私聊 openid **不用填**：留空即全部（入站不限会话，出站发给收到过消息的
-   会话）。需要限制范围时再用 `qq.groups` / `qq.privateUsers` 收窄；
+   会话，记在宿主 `storage:kv` 里，插件重启后仍然有效）。需要限制范围时再用
+   `qq.groups` / `qq.privateUsers` 收窄；
 4. 写配置后自动启用并启动，成功后直接显示「已安装并启动」。
 5. 插件跟随 `qq.server` 选中的服务器启停：该服务器启动前先启动插件，停止后
    插件随之停止（多台服务器共用同一个插件时，最后一台停止才停），日常只需
@@ -160,8 +161,8 @@ test/                       分类、存储、分发、桥、入站、QQ、配�
 | `qq.tokenUrl` | 官方凭证地址 | `https://bots.qq.com/app/getAppAccessToken` |
 | `qq.intents` | `["group_and_c2c"]` | 事件订阅位；可选 `guilds` / `direct_message` / `interaction` 等 |
 | `qq.markdown` | `false` | 为 `true` 用 `msg_type=2` 发 Markdown；默认纯文本避免符号被渲染。群/私聊镜像的图片始终优先用 Markdown 图文，与此开关无关 |
-| `qq.groups` | `[]` | 出站 `group_openid`；同时是入站白名单。**留空 = 全部**：入站不限群，出站发给收到过消息的群 |
-| `qq.privateUsers` | `[]` | 出站私聊 `user_openid`。**留空 = 全部**：入站不限对象，出站发给给机器人发过消息的用户 |
+| `qq.groups` | `[]` | 出站 `group_openid`；同时是入站白名单。**留空 = 全部**：入站不限群，出站发给收到过消息的群。学到的群记在宿主 `storage:kv`（`plugin-data/chat-bridge/kv/`），插件重启后仍然有效 |
+| `qq.privateUsers` | `[]` | 出站私聊 `user_openid`。**留空 = 全部**：入站不限对象，出站发给给机器人发过消息的用户。同样持久化在 `storage:kv` |
 | `qq.allowedUsers` | `[]` | 非空时只允许这些 openid 进入游戏 |
 | `qq.categories` | 沿用全局 | QQ 出站类别过滤 |
 | `qq.inbound` | `true` | 是否把 QQ 消息注入游戏 |
@@ -223,7 +224,9 @@ mcsup plugin config set chat-bridge qq '{\"appId\":\"...\",\"clientSecret\":\"..
 mcsup plugin config set chat-bridge platforms '[\"qq\",\"log\"]'
 ```
 
-**能力声明**：`events`、`console:read`、`console:write`、`server:read`。
+**能力声明**：`events`、`storage:kv`、`console:read`、`console:write`、`server:read`。
+`storage:kv` 属低风险能力（安装即得），用来记住留空配置时的出站会话目标，
+让插件重启后不必等群里先说话；未授予时退化为进程内记忆并在日志说明。
 `console:write` 属高风险能力，安装向导会把它列进授权清单，由用户一次确认
 （`--yes` 视为同意）；`--no-setup` 时仍需显式 `mcsup plugin grant chat-bridge console:write`。
 未授予时插件仍会正常出站，但 QQ → 游戏方向降级为仅计数并在日志与
@@ -281,7 +284,8 @@ messages { "server": "survival", "limit": 20 }
 1. 在 [QQ 开放平台](https://q.qq.com/open) 创建机器人，取得 **AppID** 与 **ClientSecret**。
 2. 在机器人管理端配置事件订阅：群聊/单聊消息；如需频道能力，另开 `guilds` 等 intents。
 3. 把机器人拉进目标群即可。**openid 不用手填**：`qq.groups` / `qq.privateUsers` 留空即全部
-   （入站不限会话，出站发给收到过消息的会话）；需要收窄范围时再填 `group_openid` /
+   （入站不限会话，出站发给收到过消息的会话，记录持久化在宿主 `storage:kv`，重启不丢）；
+   需要收窄范围时再填 `group_openid` /
    `user_openid`（不是群号 / QQ 号，可从 `mcsup plugin logs chat-bridge` 的入站日志里取）。
 4. 官方机器人在群里**默认只能收到 @ 它的消息**（`GROUP_AT_MESSAGE_CREATE`）。群聊全量消息
    `GROUP_MESSAGE_CREATE` 与它**同属 intent `1<<25`**，本插件的默认 intents
@@ -319,6 +323,7 @@ messages { "server": "survival", "limit": 20 }
 - **去重**：入站按消息 id 记忆最近 1000 条，桥内核再按 `platform:id` 去重 10 分钟；重连后不会重复注入。
 - **过滤**：只接收 `qq.groups` 内的群与 `qq.privateUsers` 内的私聊；`allowedUsers` 可进一步收窄发言人；机器人自己的消息不会被回灌。
 - **群/私聊互通**：`qq.syncChannels`（默认 `true`）把一条 QQ 消息再发到除来源会话之外的所有目标：群里发的进私聊、私聊发的进群。消息带 `[群]` / `[私聊]` 前缀，来源会话跳过所以不会重复；机器人自己发的消息不触发入站事件，不会回环。图片（`qq.forwardMedia=true`）用**一条消息**转发：`qq.mediaMode=markdown`（默认）先转存平台素材库，再发单条 Markdown 图文 `[群] 昵称: 文字 ![图片 #宽px #高px](qqbot-media://...)`，文字在前、图片在后，手机 QQ 也能显示（实验确认：Markdown 图片不带宽高时手机和电脑都只显示 `[图片]`）。普通图片按最长边 480px 等比缩小，纯表情贴纸按 160px 缩小，避免表情被放大；`rich` 发单条富媒体（图片在上、文字在下）。素材引用保留 90 天滑动有效，配额满 100 张时自动淘汰最旧的一半。Markdown 转存或发送失败会自动退回 `rich`。纯表情消息会把贴纸并进同一条消息，不再额外补一条 `[表情]`；无贴纸可转发时显示 `[表情]` 文本。
+- **出站目标（跨重启）**：`qq.groups` / `qq.privateUsers` 留空时，目标取「收到过消息的会话」。这份记录写在宿主 `storage:kv`（键 `qq:targets`，文件在 `plugin-data/chat-bridge/kv/`，按插件 id 划分，插件升级不丢），只在真的新增/淘汰会话时写一次，写入失败只告警一次且不影响收发。未授予 `storage:kv` 时退化为进程内记忆并在日志说明。群的 `group_openid` 只能在群消息或入群事件里得知，所以群从未说过话时私聊镜像无处可发——这时会告警一次「私聊镜像暂时发不到群」，补一条群消息或填上 `qq.groups` 即可。
 - **注入安全**：`tellraw` 用 JSON 组件转义、`say` 用单行文本；两种方式都过滤控制字符，并在桥内核按注入文本做 60 秒回声抑制，避免「游戏 → QQ → 游戏」自激。注入成功时会在插件日志写一行 `[qq] 注入 <server>：[QQ] 昵称: 消息`，便于核对。
 - **注入方式与日志**：原版 Minecraft 只有 `say`/`me` 这类服务器广播会写进 `logs/latest.log`。因此「游戏内只有 `[QQ]` 标签」与「QQ 消息出现在服务器日志」不可兼得：默认 `injectMode="say"` 让日志可查，但游戏内会显示 `[Server] [QQ] ...`；改成 `injectMode="tellraw"` 则只有单标签，服务器日志里没有。
 
@@ -462,11 +467,14 @@ npm run test:real   # 真实进程 + 真实 TCP 端点
 - **入站**：格式化注入、`inboundServer`、去重、截断、全局关闭、无 `console:write` 降级、回声抑制
 - **QQ**：配置校验与默认值、`[玩家名]:消息` 格式、官方入站事件归一（@ 映射/附件/引用）、
   假 Gateway 上的 Identify、被动回复 `msg_id+msg_seq`、白名单、去重、Markdown、401 刷新 token、分片与关闭码处理
+- **出站目标持久化**：跨实例读回群/私聊目标、重复会话不重复写盘、无 `storage:kv` 时退化、
+  记录损坏按空处理、超上限淘汰、写入失败只告警一次；适配器侧覆盖「重启后仍镜像到记下的群」
+  「首条群消息写回 KV」「无群目标时告警一次」
 - MockHost：握手声明、事件 → 分类 → 入库 → 查询、配置热更新、非法配置回滚、未知平台退出码
 
 `test:real` 不是纯单元测试：它会启动构建产物 `build/bin/run.cmd`（Windows）或 `run.sh`，作为真实子进程连接本机 TCP 假宿主，走完整线上协议；同时启动一个真实的 QQ 官方协议假服务端（HTTP OpenAPI + WebSocket Gateway）：
 
-1. 插件发 `hello`，断言 `plugin_id`、四项能力（含 `console:write` / `server:read`）与订阅
+1. 插件发 `hello`，断言 `plugin_id`、五项能力（含 `storage:kv` / `console:write` / `server:read`）与订阅
 2. 宿主回 `welcome`，下发三平台配置（`log` + `null` + `qq`）与限额；QQ 指向假 OpenAPI
 3. QQ 适配器用 AppID/ClientSecret 换 token，完成 Identify（`QQBot <token>` + `group_and_c2c`）
 4. 投递 14 条事件（聊天、命令、加入/离开、控制台警告/错误/系统行、死亡、进度、服务器启动/就绪/崩溃）

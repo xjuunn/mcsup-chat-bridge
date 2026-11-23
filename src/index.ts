@@ -19,6 +19,7 @@ import { ChatBridge } from "./core/bridge.js";
 import { createQueries } from "./ops/index.js";
 import { createRegistry } from "./platforms/index.js";
 import type { GamePort, InjectMode } from "./platforms/types.js";
+import type { KvLike } from "./core/targets.js";
 
 /** 订阅事件：结构化聊天 + 玩家 + 原始控制台 + 服务器生命周期 */
 export const SUBSCRIPTIONS = [
@@ -45,6 +46,7 @@ interface RuntimeCapabilities {
       list(): Promise<readonly { readonly name: string; readonly status: string }[]>;
     };
   };
+  readonly "storage:kv"?: KvLike;
 }
 
 function bridgeOf(ctx: object): ChatBridge {
@@ -103,14 +105,28 @@ function createGamePort(ctx: object, log: LogClient): GamePort | undefined {
   };
 }
 
+/**
+ * 宿主 `storage:kv`，用于记住「见过的会话」
+ *
+ * 未授予时返回 undefined：适配器退化为进程内记忆（重启后要等群里先说一句），
+ * 并在日志里说明原因，免得用户以为持久化生效了。
+ */
+function createTargetKv(ctx: object, log: LogClient): KvLike | undefined {
+  const kv = (ctx as RuntimeCapabilities)["storage:kv"];
+  if (kv === undefined) {
+    log.warn("未授予 storage:kv：出站目标只在本次运行内有效（重启后需重新收到消息）");
+  }
+  return kv;
+}
+
 export const plugin = definePlugin({
   id: "chat-bridge",
   title: "聊天桥",
-  version: "0.1.20",
+  version: "0.1.21",
   license: "MIT",
   description: "采集 Minecraft 聊天与控制台消息，按可插拔平台分发，并支持平台消息回流游戏",
   resident: true,
-  capabilities: ["events", "console:read", "console:write", "server:read"],
+  capabilities: ["events", "storage:kv", "console:read", "console:write", "server:read"],
   config: configSchema,
   // 服务器绑定：`qq.server` 是「QQ 消息注入哪台服务器」，宿主据此让插件
   // 跟随服务器启停——绑定的服务器启动前先拉起插件，全部停止后再收掉。
@@ -167,11 +183,13 @@ export const plugin = definePlugin({
 
   async onStart(ctx) {
     const config = resolveConfig(ctx.config);
+    const kv = createTargetKv(ctx, ctx.log);
     const bridge = new ChatBridge({
       log: ctx.log,
       registry: createRegistry(),
       config,
       game: createGamePort(ctx, ctx.log),
+      ...(kv === undefined ? {} : { kv }),
     });
     bridges.set(ctx, bridge);
     try {

@@ -5,6 +5,7 @@ import { WebSocketServer, type WebSocket as WsSocket } from "ws";
 import type { LogClient } from "mcsup-plugin";
 
 import type { NormalizedMessage } from "../src/core/types.js";
+import type { KvLike } from "../src/core/targets.js";
 import {
   buildMediaMarkdown,
   formatOutbound,
@@ -20,6 +21,19 @@ const AT = "2026-11-21T12:00:00.000Z";
 
 function fakeLog(): LogClient {
   return { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+}
+
+/** 宿主 KV 的替身；测试用它模拟「上次运行记下的会话」 */
+function fakeKv(): KvLike & { get(key: string): Promise<Uint8Array | null> } {
+  const data = new Map<string, Uint8Array>();
+  return {
+    async get(key: string): Promise<Uint8Array | null> {
+      return data.get(key) ?? null;
+    },
+    async set(key: string, value: string | Uint8Array): Promise<void> {
+      data.set(key, typeof value === "string" ? new TextEncoder().encode(value) : value);
+    },
+  };
 }
 
 function message(overrides: Partial<NormalizedMessage> = {}): NormalizedMessage {
@@ -305,6 +319,7 @@ function startPlatform(
   fake: FakeQq,
   settings: Record<string, unknown>,
   inbound: PlatformInboundMessage[] = [],
+  kv?: KvLike,
 ): RunningPlatform {
   const platform = new QqPlatform({
     log: fakeLog(),
@@ -316,6 +331,7 @@ function startPlatform(
       sendIntervalMs: 0,
       ...settings,
     },
+    ...(kv === undefined ? {} : { kv }),
   });
   const abort = new AbortController();
   platform.start({ log: fakeLog(), signal: abort.signal, inbound: (item) => inbound.push(item) });
@@ -907,8 +923,97 @@ describe("QQ 适配器（假官方 Gateway + REST）", () => {
     expect(fake.posts.some((post) => post.path === "/v2/users/u1/messages")).toBe(false);
   });
 
-  it("syncChannels=false 时不镜像", async () => {
+  it("重启后仍把私聊镜像到上次记下的群（出站目标持久化）", async () => {
     const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    // 插件重启后 host KV 里仍有上次记下的群：不必等群里先说话
+    const kv = fakeKv();
+    await kv.set("qq:targets", JSON.stringify({ v: 1, groups: ["gSaved"], users: [] }));
+    const inbound: PlatformInboundMessage[] = [];
+    startPlatform(fake, { allowPrivate: true }, inbound, kv);
+    await fake.ready();
+
+    fake.dispatch("C2C_MESSAGE_CREATE", {
+      id: "c2c-saved",
+      content: "重启后的私聊",
+      author: { user_openid: "u9", username: "小B" },
+    });
+    await waitFor(() => inbound.length === 1, "私聊入站");
+    await waitFor(() => fake.posts.length >= 1, "镜像到记下的群");
+
+    expect(fake.posts[0]?.path).toBe("/v2/groups/gSaved/messages");
+    expect(fake.posts[0]?.body["content"]).toBe("[私聊] 小B: 重启后的私聊");
+  });
+
+  it("首次收到群消息时把群记进 KV，供下次启动使用", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const kv = fakeKv();
+    const inbound: PlatformInboundMessage[] = [];
+    startPlatform(fake, {}, inbound, kv);
+    await fake.ready();
+
+    fake.dispatch("GROUP_MESSAGE_CREATE", {
+      id: "g-learn-1",
+      group_openid: "gLearned",
+      content: "先说一句",
+      author: { member_openid: "u1", member_nickname: "小A" },
+    });
+    await waitFor(() => inbound.length === 1, "群消息入站");
+
+    const deadline = Date.now() + 3_000;
+    let saved = "";
+    while (Date.now() < deadline) {
+      const raw = await kv.get("qq:targets");
+      saved = raw === null ? "" : Buffer.from(raw).toString("utf8");
+      if (saved.includes("gLearned")) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(JSON.parse(saved)).toMatchObject({ groups: ["gLearned"] });
+  });
+
+  it("没有群目标时告警一次「私聊镜像发不到群」", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const log = fakeLog();
+    const platform = new QqPlatform({
+      log,
+      settings: {
+        appId: "app-1",
+        clientSecret: "secret-1",
+        apiBase: fake.apiBase,
+        tokenUrl: fake.tokenUrl,
+        sendIntervalMs: 0,
+        allowPrivate: true,
+      },
+    });
+    const abort = new AbortController();
+    const inbound: PlatformInboundMessage[] = [];
+    platform.start({ log, signal: abort.signal, inbound: (item) => inbound.push(item) });
+    cleanup.push(async () => {
+      abort.abort();
+      await platform.stop("test");
+    });
+    await fake.ready();
+
+    fake.dispatch("C2C_MESSAGE_CREATE", {
+      id: "c2c-blind",
+      content: "还没人开过群聊",
+      author: { user_openid: "u9", username: "小B" },
+    });
+    await waitFor(() => inbound.length === 1, "私聊入站");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    expect(fake.posts).toHaveLength(0);
+    const warnings = (log.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls.map(
+      (call) => String(call[0]),
+    );
+    expect(warnings.filter((text) => text.includes("私聊镜像暂时发不到群"))).toHaveLength(1);
+  });
+
+  it("syncChannels=false 时不镜像", async () => {    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
     cleanup.push(() => fake.close());
     const inbound: PlatformInboundMessage[] = [];
     startPlatform(

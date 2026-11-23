@@ -142,7 +142,7 @@ export const configSchema = s.object({
             maxItems: 32,
             label: "群聊",
             describe:
-              "出站目标 group_openid；同时作为入站白名单。留空表示全部：入站不限群，出站发给收到过消息的群",
+              "出站目标 group_openid；同时作为入站白名单。留空表示全部：入站不限群，出站发给收到过消息的群（记录在宿主 KV，重启后仍有效）",
           }),
         ),
         privateUsers: s.optional(
@@ -150,7 +150,7 @@ export const configSchema = s.object({
             maxItems: 32,
             label: "私聊对象",
             describe:
-              "出站私聊目标 user_openid（不是 QQ 号）。留空表示全部：入站不限对象，出站发给给机器人发过消息的用户",
+              "出站私聊目标 user_openid（不是 QQ 号）。留空表示全部：入站不限对象，出站发给给机器人发过消息的用户（记录在宿主 KV，重启后仍有效）",
           }),
         ),
         allowedUsers: s.optional(

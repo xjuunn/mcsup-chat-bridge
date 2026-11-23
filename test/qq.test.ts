@@ -970,9 +970,11 @@ describe("QQ 适配器（假官方 Gateway + REST）", () => {
 
     fake.failNextWith(401);
     platform.deliver(message());
-    await waitFor(() => fake.posts.length === 1, "首次发送");
-    await waitFor(() => fake.tokenCalls() === 2, "刷新 token");
-    await waitFor(() => fake.posts.length === 2, "重试发送");
+    // `apiRequest` 碰到 401 会在内部刷新 token 后立刻重发，所以「恰好 1 条」这个
+    // 中间态只存在一两毫秒，等它会和重试竞态；直接等终态（第 2 条已发出）再断言。
+    await waitFor(() => fake.posts.length >= 2, "401 后重试发送");
+    expect(fake.tokenCalls()).toBe(2);
+    expect(fake.posts[0]?.auth).toBe("QQBot tok-1");
     expect(fake.posts[1]?.auth).toBe("QQBot tok-2");
     expect(fake.posts[1]?.body["content"]).toBe("[Steve]:hello");
   });

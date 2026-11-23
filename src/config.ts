@@ -69,7 +69,7 @@ export const configSchema = s.object({
     default: "say",
     label: "注入方式",
     describe:
-      "say（默认）：游戏内广播并写入服务器 logs/latest.log，会多出 [Server] 前缀；tellraw：只显示在游戏内、不写日志，游戏里只有 [QQ] 标签。原版只有 say/me 这类服务器广播会进日志，两者不可兼得",
+      "say（默认）：游戏内广播并写入服务器 logs/latest.log，会多出 [Server] 前缀；tellraw：只显示在游戏内、不写日志，游戏里只有 [QQ] / [Telegram] 标签。原版只有 say/me 这类服务器广播会进日志，两者不可兼得",
   }),
   log: s.optional(
     s.object(
@@ -267,6 +267,149 @@ export const configSchema = s.object({
         }),
       },
       { label: "QQ 机器人（官方 API v2）" },
+    ),
+  ),
+  telegram: s.optional(
+    s.object(
+      {
+        botToken: secretInput(
+          s.string({
+            max: 256,
+            label: "Bot Token",
+            describe: "Telegram 里找 @BotFather，用 /newbot 或 /token 获取；形如 123456:AAAA...",
+          }),
+        ),
+        apiBase: s.optional(
+          s.string({
+            max: 512,
+            label: "Bot API 基址",
+            describe: "默认 https://api.telegram.org；使用自建 Bot API 服务时再改",
+          }),
+        ),
+        groups: s.optional(
+          s.array(s.string({ max: 64, label: "群 chat_id" }), {
+            maxItems: 32,
+            label: "群聊",
+            describe:
+              "出站目标 chat_id（群与超级群是负数，形如 -1001234567890），也可写 @username。同时作为入站白名单。留空表示全部：入站不限群，出站发给收到过消息的群（记录在宿主 KV，重启后仍有效）",
+          }),
+        ),
+        privateUsers: s.optional(
+          s.array(s.string({ max: 64, label: "用户 id" }), {
+            maxItems: 32,
+            label: "私聊对象",
+            describe:
+              "出站私聊 user id（数字，也可写 @username）。留空表示全部：入站不限对象，出站发给给机器人发过消息的用户（记录在宿主 KV，重启后仍有效）",
+          }),
+        ),
+        allowedUsers: s.optional(
+          s.array(s.string({ max: 64, label: "用户 id" }), {
+            maxItems: 64,
+            label: "入站发言人白名单",
+            describe: "非空时只允许这些 user id（或 @username）的消息进入游戏；空表示桥接聊天内所有人",
+          }),
+        ),
+        categories: s.optional(
+          s.array(s.enum(CATEGORIES), {
+            label: "转发类别",
+            describe: "Telegram 出站只转发这些类别；省略时沿用全局 forwardCategories",
+          }),
+        ),
+        inbound: s.boolean({
+          default: true,
+          label: "接收 Telegram 消息",
+          describe: "为 false 时只出站，不把 Telegram 消息注入游戏",
+        }),
+        allowPrivate: s.boolean({
+          default: false,
+          label: "接收私聊",
+          describe: "是否把私聊消息注入游戏；默认关闭，避免陌生人打扰",
+        }),
+        syncChannels: s.boolean({
+          default: true,
+          label: "群聊/私聊互相同步",
+          describe:
+            "为 true 时，群里收到的 Telegram 消息也会转发到私聊目标，私聊收到的也会转发到群目标（同一会话不重复发送）；只影响 Telegram 内部会话，不影响游戏注入",
+        }),
+        forwardMedia: s.boolean({
+          default: true,
+          label: "同步媒体",
+          describe:
+            "为 true 时，群/私聊互转会转发图片/视频/动图/文件（复用 Telegram 的 file_id），文字在前、媒体在后",
+        }),
+        label: s.string({
+          default: "Telegram",
+          max: 16,
+          label: "游戏内标签",
+          describe: "注入游戏时显示的前缀，例如 [Telegram] 昵称: 消息",
+        }),
+        server: s.optional(
+          s.string({
+            max: 64,
+            label: "入站服务器",
+            describe: "Telegram 消息默认注入的服务器；省略时使用全局 inboundServer 或自动选择",
+          }),
+        ),
+        maxLength: s.integer({
+          default: 3_500,
+          min: 64,
+          max: 4_096,
+          label: "单条出站上限",
+          describe: "超过后按此长度分片发送；Telegram 单条文本上限 4096",
+        }),
+        linkPreview: s.boolean({
+          default: false,
+          label: "展开链接预览",
+          describe: "为 false（默认）时关闭网页预览，避免聊天里的链接刷屏",
+        }),
+        sendIntervalMs: s.integer({
+          default: 1_000,
+          min: 0,
+          max: 10_000,
+          label: "发送间隔",
+          describe: "两次 Bot API 调用之间的最小间隔，用于温柔限流；同一群官方限制约 20 条/分钟",
+        }),
+        apiTimeoutMs: s.integer({
+          default: 15_000,
+          min: 1_000,
+          max: 60_000,
+          label: "API 超时",
+        }),
+        pollTimeoutSecs: s.integer({
+          default: 30,
+          min: 1,
+          max: 50,
+          label: "长轮询等待",
+          describe: "getUpdates 的等待秒数；Bot API 上限 50 秒",
+        }),
+        pollLimit: s.integer({
+          default: 100,
+          min: 1,
+          max: 100,
+          label: "单次收取条数",
+          describe: "单次 getUpdates 最多取多少条；Bot API 上限 100",
+        }),
+        reconnectMinMs: s.integer({
+          default: 1_000,
+          min: 200,
+          max: 60_000,
+          label: "重连最小间隔",
+        }),
+        reconnectMaxMs: s.integer({
+          default: 60_000,
+          min: 1_000,
+          max: 600_000,
+          label: "重连最大间隔",
+        }),
+        reconnectMaxAttempts: s.integer({
+          default: 0,
+          min: 0,
+          max: 10_000,
+          label: "最大重连次数",
+          describe: "0 表示无限重试；401/404 等凭证问题会直接停止",
+        }),
+      },
+      { label: "Telegram 机器人（Bot API 长轮询）" },
     ),
   ),
 });

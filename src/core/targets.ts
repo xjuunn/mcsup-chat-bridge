@@ -1,11 +1,12 @@
 /**
  * 出站会话目标：留空配置时「发给谁」的记忆
  *
- * QQ 官方不给「群号 → group_openid」的换算，只能在收到群消息或入群事件时才知道
- * 那个 openid。`qq.groups` / `qq.privateUsers` 留空时，出站目标就取这些「见过
- * 的会话」——所以这份记忆必须是**持久的**：进程重启（插件升级、宿主重启、`config
- * set` 触发的平台重建）后清空的话，群里没先说话之前，私聊镜像就无处可发，而且
- * 是静默丢弃。
+ * 平台不保证配置里能写出目标 id：QQ 官方不给「群号 → group_openid」的换算，
+ * 只能在收到群消息或入群事件时才知道那个 openid；Telegram 的 chat_id 虽然
+ * 能从客户端里查，但绝大多数用户不知道去哪里找。`groups` / `privateUsers`
+ * 留空时，出站目标就取这些「见过的会话」——所以这份记忆必须是**持久的**：
+ * 进程重启（插件升级、宿主重启、`config set` 触发的平台重建）后清空的话，
+ * 群里没先说话之前，私聊镜像就无处可发，而且是静默丢弃。
  *
  * 存储走宿主的 `storage:kv`（`plugin-data/<id>/kv/`，按插件 id 而非版本划分，
  * 升级不丢）。未授予该能力时退化为进程内记忆：行为与旧版一致，不阻塞启动。
@@ -44,6 +45,8 @@ export interface LearnedTargetsOptions {
   /** 宿主 KV；未授予 `storage:kv` 时为 undefined */
   readonly kv?: KvLike;
   readonly log: LogClient;
+  /** 日志前缀里的平台名，默认 `qq`（保持既有日志不变） */
+  readonly tag?: string;
   /** 每类会话的上限，默认 {@link DEFAULT_LEARNED_LIMIT} */
   readonly limit?: number;
 }
@@ -53,6 +56,7 @@ export class LearnedTargets {
   private readonly key: string;
   private readonly kv: KvLike | undefined;
   private readonly log: LogClient;
+  private readonly tag: string;
   private readonly limit: number;
   private readonly groupList: string[] = [];
   private readonly userList: string[] = [];
@@ -63,6 +67,7 @@ export class LearnedTargets {
     this.key = options.key;
     this.kv = options.kv;
     this.log = options.log;
+    this.tag = options.tag ?? "qq";
     this.limit = Math.max(1, Math.trunc(options.limit ?? DEFAULT_LEARNED_LIMIT));
   }
 
@@ -78,7 +83,7 @@ export class LearnedTargets {
       }
       const snapshot = parseSnapshot(Buffer.from(raw).toString("utf8"), this.limit);
       if (snapshot === undefined) {
-        this.log.warn(`[qq] 出站目标记录不可读，按空处理（键 ${this.key}）`);
+        this.log.warn(`[${this.tag}] 出站目标记录不可读，按空处理（键 ${this.key}）`);
         return;
       }
       // 先读到的算最早：之后新学到的追加在后面，淘汰时仍按「最早先丢」
@@ -90,13 +95,13 @@ export class LearnedTargets {
       }
       if (this.groupList.length + this.userList.length > 0) {
         this.log.info(
-          `[qq] 恢复出站目标：群 ${this.groupList.length} 个、私聊 ${this.userList.length} 个`,
+          `[${this.tag}] 恢复出站目标：群 ${this.groupList.length} 个、私聊 ${this.userList.length} 个`,
         );
       }
     } catch (error) {
       if (!this.loadWarned) {
         this.loadWarned = true;
-        this.log.warn(`[qq] 读取出站目标失败，按空处理：${errorText(error)}`);
+        this.log.warn(`[${this.tag}] 读取出站目标失败，按空处理：${errorText(error)}`);
       }
     }
   }
@@ -153,7 +158,7 @@ export class LearnedTargets {
       // 落盘失败不影响收发：本次会话仍在内存里，下次新增时会再试
       if (!this.saveWarned) {
         this.saveWarned = true;
-        this.log.warn(`[qq] 保存出站目标失败（重启后会丢）：${errorText(error)}`);
+        this.log.warn(`[${this.tag}] 保存出站目标失败（重启后会丢）：${errorText(error)}`);
       }
     }
   }

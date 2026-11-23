@@ -9,6 +9,7 @@ import { PlatformRegistry } from "./registry.js";
 import { logPlatformFactory } from "./log.js";
 import { nullPlatformFactory } from "./null.js";
 import { qqPlatformFactory } from "./qq.js";
+import { telegramPlatformFactory } from "./telegram.js";
 import type { PlatformFactory } from "./types.js";
 
 /** 内置平台（按 id 排序展示） */
@@ -16,6 +17,7 @@ export const BUILTIN_PLATFORMS: readonly PlatformFactory[] = [
   logPlatformFactory,
   nullPlatformFactory,
   qqPlatformFactory,
+  telegramPlatformFactory,
 ];
 
 /** 新建注册表；`extra` 供测试或上层注入自定义适配器 */

@@ -2,12 +2,13 @@
 
 MCSUP 聊天桥插件：订阅 Minecraft 服务器的聊天、控制台与生命周期事件，归一化为统一消息模型，分类后分发到可插拔的聊天平台。
 
-架构分两层：平台无关内核（采集 → 归一化 → 分类 → 入库 → 分发）与可插拔平台适配器。内置 **QQ 官方机器人（API v2）**、`log`、`null` 三种适配器。
+架构分两层：平台无关内核（采集 → 归一化 → 分类 → 入库 → 分发）与可插拔平台适配器。内置 **QQ 官方机器人（API v2）**、**Telegram 机器人（Bot API 长轮询）**、`log`、`null` 四种适配器。
 
-QQ 适配器支持**双向互通**：
+QQ 与 Telegram 适配器支持**双向互通**：
 
-- 游戏 → QQ：玩家聊天按 `[玩家名]:消息` 发送到群/私聊；
-- QQ → 游戏：群聊消息（可选私聊）经 `console:write` 注入游戏，显示为 `[QQ] 昵称: 消息`；注入方式由 `injectMode` 决定（默认 `say` 会写进服务器日志，`tellraw` 只显示在游戏内）。
+- 游戏 → 平台：玩家聊天按 `[玩家名]:消息` 发送到群/私聊；
+- 平台 → 游戏：群聊消息（可选私聊）经 `console:write` 注入游戏，显示为 `[QQ] 昵称: 消息` / `[Telegram] 昵称: 消息`；注入方式由 `injectMode` 决定（默认 `say` 会写进服务器日志，`tellraw` 只显示在游戏内）。
+- 两者都支持群聊与私聊**互相同步**（`qq.syncChannels` / `telegram.syncChannels`）；Telegram 复用 `file_id` 直接转发图片/视频/文件。
 
 ## 快速开始
 
@@ -49,16 +50,18 @@ mcsup plugin install --from .\build
    - `启用的平台` 是多选框：`■`/`□` 表示是否选中，空格切换、回车确认；
    - `游戏内注入方式` 是单选项；`入站服务器` 从已注册服务器中单选（必填），
      还没有服务器时才退回手输；
-   - `AppID`、`ClientSecret` 等输入框**不会预填旧值**：留空即沿用，
-     密钥每输入一个字符显示一个 `*`；
+   - `QQ AppID` / `QQ ClientSecret` / `Telegram Bot Token` 三项**都是非必填**：
+     只用 QQ 就把 Bot Token 留空回车跳过，只用 Telegram 就把两项 QQ 凭据留空跳过；
+     对应平台缺少凭据时，适配器启动会以 `invalid_input` 明确报错（不会静默不出网）；
+   - 输入框**不会预填旧值**：留空即沿用，密钥每输入一个字符显示一个 `*`；
    - 必填项没有旧值可沿用时不能回车跳过，会提示后重新提问（`Ctrl+C` 取消）；
-3. 群 / 私聊 openid **不用填**：留空即全部（入站不限会话，出站发给收到过消息的
+3. 群 / 私聊 id **不用填**：留空即全部（入站不限会话，出站发给收到过消息的
    会话，记在宿主 `storage:kv` 里，插件重启后仍然有效）。需要限制范围时再用
-   `qq.groups` / `qq.privateUsers` 收窄；
+   `qq.groups` / `qq.privateUsers`，或 `telegram.groups` / `telegram.privateUsers` 收窄；
 4. 写配置后自动启用并启动，成功后直接显示「已安装并启动」。
-5. 插件跟随 `qq.server` 选中的服务器启停：该服务器启动前先启动插件，停止后
-   插件随之停止（多台服务器共用同一个插件时，最后一台停止才停），日常只需
-   `mcsup server start / stop`。
+5. 插件跟随服务器启停：`inboundServer`（以及可选的 `qq.server` / `telegram.server`）
+   选中的服务器启动前先启动插件，停止后插件随之停止（多台服务器共用同一个插件时，
+   最后一台停止才停），日常只需 `mcsup server start / stop`。
 
 脚本或 CI 用 `--yes` 视为同意能力授权；`--no-setup` 跳过整个向导，
 回到旧行为（装完需手动 `grant` / `config set` / `enable` / `start`）。
@@ -82,18 +85,20 @@ src/
   platforms/                可插拔平台层
     types.ts                ChatPlatform / PlatformFactory / GamePort / 入站消息契约
     registry.ts             注册表（id 校验、实例化）
+    format.ts               出站文本格式（`[玩家名]:消息`）与按码点分片
     qq.ts                   QQ 官方机器人 API v2（WebSocket Gateway + OpenAPI，双向）
+    telegram.ts             Telegram Bot API（getUpdates 长轮询 + REST，双向、群私聊同步）
     log.ts                  占位平台：写到插件日志
     null.ts                 空平台：只采集、不投递
     index.ts                内置平台注册入口
   events/normalize.ts       宿主事件校验（zod）与归一化
-  config.ts                 配置 schema（含 QQ 与密钥字段）、resolveConfig
+  config.ts                 配置 schema（含 QQ / Telegram 与密钥字段）、resolveConfig
   ops/index.ts              messages（table + 分页）与 status（detail，含入站统计）
   index.ts                  definePlugin 接线、能力声明、GamePort（say / tellraw）
 scripts/
   ensure-sdk.mjs            SDK 缺失或过期（mtime）时自动构建
   real-host-check.mjs       真实子进程 + 真实 TCP 假宿主 + 真实 QQ 官方协议（REST + Gateway）
-test/                       分类、存储、分发、桥、入站、QQ、配置、事件、MockHost
+test/                       分类、存储、分发、桥、入站、QQ、Telegram、配置、事件、MockHost
 ```
 
 构建产物在 `build/`：`manifest.json`、`descriptor.json`、`bin/run.cmd|run.sh`、`bin/entry.mjs`、`dist/`、`node_modules/`（vendor 的运行期依赖）。整个目录可直接 `mcsup plugin install --from`。
@@ -148,10 +153,10 @@ test/                       分类、存储、分发、桥、入站、QQ、配�
 | `consoleForward` | `false` | 默认不转发控制台/日志行（`source=console`）；只采集入库。需要把服务器 `say`、日志同步到平台时再打开 |
 | `storeSize` | `200` | 环形缓存条数（10–5000） |
 | `queueCapacity` | `256` | 单平台出站与全局入站队列的积压上限（8–4096），超出丢最旧 |
-| `inbound` | `true` | 是否允许平台消息注入游戏；关闭后 QQ 仍可出站 |
+| `inbound` | `true` | 是否允许平台消息注入游戏；关闭后 QQ / Telegram 仍可出站 |
 | `inboundServer` | 自动 | 入站默认服务器；省略时选运行中的服务器 |
 | `inboundMaxLength` | `200` | 单条入站文本上限（32–512），超长截断 |
-| `injectMode` | `"say"` | 平台消息注入游戏的方式：`say` 会写入 `logs/latest.log`，但游戏内多出 `[Server]` 前缀；`tellraw` 游戏里只有 `[QQ]` 标签但不写服务器日志（原版只有 `say`/`me` 这类服务器广播会进日志） |
+| `injectMode` | `"say"` | 平台消息注入游戏的方式：`say` 会写入 `logs/latest.log`，但游戏内多出 `[Server]` 前缀；`tellraw` 游戏里只有 `[QQ]` / `[Telegram]` 标签但不写服务器日志（原版只有 `say`/`me` 这类服务器广播会进日志） |
 | `log.prefix` | `"chat-bridge"` | 日志平台前缀 |
 | `log.level` | `"info"` | `info` / `debug` |
 | `qq.appId` | 无（必填） | QQ 开放平台机器人 AppID |
@@ -180,6 +185,26 @@ test/                       分类、存储、分发、桥、入站、QQ、配�
 | `qq.apiTimeoutMs` | `15000` | 单次 HTTP 调用超时 |
 | `qq.reconnectMinMs` / `reconnectMaxMs` | `1000` / `60000` | 重连退避范围（带抖动） |
 | `qq.reconnectMaxAttempts` | `0` | 最大重连次数，0 表示无限重试 |
+| `telegram.botToken` | 无（必填） | @BotFather 发放的机器人 token（形如 `123456:AAAA...`）；界面遮蔽、读取打码 |
+| `telegram.apiBase` | `"https://api.telegram.org"` | Bot API 基址；使用自建 Bot API 服务时再改 |
+| `telegram.groups` | `[]` | 出站群 `chat_id`（群/超级群为负，如 `-1001234567890`，也可写 `@username`），同时是入站白名单。**留空 = 全部**：入站不限群，出站发给收到过消息的群；学到的群记在宿主 `storage:kv`，重启后仍有效 |
+| `telegram.privateUsers` | `[]` | 出站私聊 `user id`（数字或 `@username`）。**留空 = 全部**：出站发给给机器人发过消息的用户；同样持久化 |
+| `telegram.allowedUsers` | `[]` | 非空时只允许这些 `user id` / `@username` 的消息进入游戏 |
+| `telegram.categories` | 沿用全局 | Telegram 出站类别过滤 |
+| `telegram.inbound` | `true` | 是否把 Telegram 消息注入游戏 |
+| `telegram.allowPrivate` | `false` | 是否接收私聊（默认关闭，避免陌生人打扰） |
+| `telegram.syncChannels` | `true` | 群聊与私聊互相同步：群里收到的消息也会发到私聊目标，私聊收到的也会发到群目标；来源会话不重复发送 |
+| `telegram.forwardMedia` | `true` | 群/私聊互转时转发图片/视频/动图/文件，复用 Telegram 的 `file_id`（不下载、不上传），文字在前、媒体在后 |
+| `telegram.label` | `"Telegram"` | 游戏内显示为 `[Telegram] 昵称: 消息` |
+| `telegram.server` | 全局 | 该适配器的入站默认服务器，同时决定插件跟随哪台服务器启停 |
+| `telegram.maxLength` | `3500` | 单条出站上限，超出按此分片（Telegram 上限 4096，按 UTF-16 计长） |
+| `telegram.linkPreview` | `false` | 是否展开消息里的网页预览；默认关闭避免刷屏 |
+| `telegram.sendIntervalMs` | `1000` | 两次 Bot API 调用的最小间隔，温柔限流（同一群官方限制约 20 条/分钟） |
+| `telegram.apiTimeoutMs` | `15000` | 单次 HTTP 调用超时 |
+| `telegram.pollTimeoutSecs` | `30` | `getUpdates` 长轮询等待秒数（Bot API 上限 50） |
+| `telegram.pollLimit` | `100` | 单次 `getUpdates` 最多取多少条（Bot API 上限 100） |
+| `telegram.reconnectMinMs` / `reconnectMaxMs` | `1000` / `60000` | 断线重连退避范围（带抖动） |
+| `telegram.reconnectMaxAttempts` | `0` | 最大重连次数，0 表示无限重试；401/404 凭证问题会直接停止 |
 
 平台专属配置放在与适配器 id 同名的字段下。QQ 示例：
 
@@ -204,24 +229,54 @@ test/                       分类、存储、分发、桥、入站、QQ、配�
 }
 ```
 
-**密钥与持久化**：`qq.clientSecret` 用 SDK 的 `secretInput` 标记，descriptor 里是
-`x-mcsup-secret: true`。宿主负责按插件隔离、加密持久化（`secrets.json`），
-管理端读取时返回 `***`，插件握手时收到明文才能工作；插件自身不落盘任何密钥，
-日志与 `status` 也不会输出 `clientSecret` 或 `access_token`。
+Telegram 示例（两个平台可同时启用）：
 
-**写入顺序（手工配置时）**：`mcsup plugin config set` 每次都会对**合并后的完整配置**做
-schema 校验，而 schema 的默认值里已经包含 `qq` 对象。`qq.appId` / `qq.clientSecret`
-是必填项，所以必须先写完整 `qq` 块，再写 `platforms` 等顶层键；顺序反了会得到
-`config.qq.appId: required field is missing`，且该次写入不会生效。
+```json
+{
+  "platforms": ["qq", "telegram"],
+  "forwardCategories": ["chat"],
+  "inbound": true,
+  "inboundServer": "survival",
+  "qq": {
+    "appId": "102000001",
+    "clientSecret": "your-client-secret"
+  },
+  "telegram": {
+    "botToken": "123456:AA...",
+    "groups": ["-1001234567890"],
+    "privateUsers": [],
+    "allowPrivate": true,
+    "syncChannels": true,
+    "forwardMedia": true,
+    "label": "Telegram",
+    "server": "survival"
+  }
+}
+```
 
-安装向导不走这条路径：它用深度合并按字段写入，只改目标键，不会覆盖 `qq` 的
-其它值，也不会把打码后的 `***` 写回。下面的手工写法只用于装完之后补改：
+**密钥与持久化**：`qq.clientSecret` / `telegram.botToken` 用 SDK 的 `secretInput` 标记，
+descriptor 里是 `x-mcsup-secret: true`。宿主负责按插件隔离、加密持久化
+（`secrets.json`），管理端读取时返回 `***`，插件握手时收到明文才能工作；插件自身
+不落盘任何密钥，日志与 `status` 也不会输出 `clientSecret`、`botToken` 或
+`access_token`。Telegram 的 HTTP URL 含 token，适配器日志只记录方法名，不打印完整
+URL。
+
+**写入顺序（手工配置时）**：`mcsup plugin config set` 每次都会对**合并后的完整配置**
+做 schema 校验。`qq` / `telegram` 片段都是可选的，但**一旦写了片段**，其中
+`qq.appId` + `qq.clientSecret`、`telegram.botToken` 就是必填项（片段写一半会得到
+`config.telegram.botToken: required field is missing`，且该次写入不会生效）。
+所以手工配置时先写完整的平台块，再写 `platforms` 等顶层键：
+
+安装向导不走这条路径：它用深度合并按字段写入，只改目标键，不会覆盖平台块的
+其它值，也不会把打码后的 `***` 写回；留空跳过的凭据不会创建对应片段。下面的
+手工写法只用于装完之后补改：
 
 ```powershell
-# 先写 qq 整块（内部双引号写成 \"，见文首安装说明）
+# 先写平台整块（内部双引号写成 \"，见文首安装说明）
 mcsup plugin config set chat-bridge qq '{\"appId\":\"...\",\"clientSecret\":\"...\"}'
+mcsup plugin config set chat-bridge telegram '{\"botToken\":\"123456:AA...\"}'
 # 再写其余顶层键
-mcsup plugin config set chat-bridge platforms '[\"qq\",\"log\"]'
+mcsup plugin config set chat-bridge platforms '[\"qq\",\"telegram\",\"log\"]'
 ```
 
 **能力声明**：`events`、`storage:kv`、`console:read`、`console:write`、`server:read`。
@@ -348,43 +403,141 @@ messages { "server": "survival", "limit": 20 }
 
 真实联调只需把 `qq.appId` / `qq.clientSecret` / `qq.groups` 换成机器人的实际配置。
 
+## Telegram 机器人对接
+
+本项目对接的是 **Telegram Bot API**（`api.telegram.org`），走 **`getUpdates` 长轮询**
+而不是 webhook：插件运行在宿主沙箱里，没有公网入口，长轮询是唯一不需要暴露端口的
+方案。offset 持久化在宿主 `storage:kv`（键 `telegram:offset`），重启不会重复收取
+已经确认过的 update。
+
+### 前置条件
+
+1. 在 Telegram 里找 [@BotFather](https://t.me/BotFather)，`/newbot` 创建机器人并取得
+   **bot token**（形如 `123456:AAAA...`）；已有机器人用 `/token` 重新查看。
+2. **群聊必须关闭隐私模式**：BotFather 里 `/setprivacy` → 选中该机器人 → `Disable`。
+   Telegram 默认只把 @ 机器人或命令消息推给机器人；关闭后群内每条消息都会推送。
+   私聊不受此限制。修改后需要把机器人移出群再拉回（或重启会话）才生效。
+3. 把机器人拉进目标群即可。**chat_id / user id 不用手填**：`telegram.groups` /
+   `telegram.privateUsers` 留空即全部（入站不限会话，出站发给收到过消息的会话，
+   记录持久化在宿主 `storage:kv`，重启不丢）；需要收窄范围时再填 chat_id。
+   Telegram 的群 id 是负数（超级群/论坛群形如 `-1001234567890`），私聊 id 是正数；
+   两者都能从 `mcsup plugin logs chat-bridge` 的入站日志里看到。
+4. **论坛群（话题）**：适配器会记住收到的 `message_thread_id`，出站回到同一个话题；
+   `General` 话题的 id 固定为 `1`，发送时自动省略（否则 Telegram 会拒绝）。
+5. 机器人自己的消息（`from.is_bot=true`）会被丢弃，不会来回自激；嫌吵可用
+   `telegram.allowedUsers` 只放行指定发言人。
+
+### 协议链路
+
+- **入站**：`POST {apiBase}/bot{token}/getUpdates`，带 `offset`（最后确认的
+  `update_id + 1`）、`timeout`（长轮询秒数）、`limit` 与
+  `allowed_updates: ["message"]`。只处理新消息；`edited_message` 的 `message_id`
+  与原文相同，会被去重挡掉，因此不订阅。
+- **出站**：`POST /sendMessage`，`parse_mode: "HTML"`，文本按 `&` / `<` / `>`
+  转义后发送；超长按 `maxLength` 分片。媒体用 `sendPhoto` / `sendVideo` /
+  `sendAnimation` / `sendDocument`，直接复用 Telegram 的 `file_id`（不下载、
+  不上传），文字在前、媒体在后。
+- **冲突**：同一个 bot 只能有一个 `getUpdates` 消费者。若另一个实例或残留 webhook
+  占位（409），首次自动 `deleteWebhook` 一次，之后仍冲突则退避 10 秒重试。
+
+### 消息格式
+
+| 方向 | 格式 | 说明 |
+| --- | --- | --- |
+| 游戏 → Telegram | `[玩家名]:消息` | 玩家聊天严格使用此格式，例如 `[Steve]:你好` |
+| 游戏 → Telegram（非聊天） | `[加入] Alex: Alex 加入了游戏` | 用中文类别标签，避免歧义 |
+| Telegram → 游戏 | `[Telegram] 昵称: 消息` | 通过 `injectMode` 注入（默认 `say`，游戏内会多出 `[Server]` 前缀；改成 `tellraw` 则只有单标签）；可选 `telegram.server` / `inboundServer` |
+| Telegram 群 ↔ 私聊 | `[群] 昵称: ...` / `[私聊] 昵称: ...` | `syncChannels` 镜像，来源会话不重复发送 |
+
+入站会把图片、视频、动图、语音、音频、视频消息、表情、文件、位置、投票、联系人、
+骰子转成 `[图片]` / `[视频]` / `[文件: 名称]` 之类的占位文本；一个消息只会有一种媒体
+（GIF 同时带 `animation` 与 `document` 时按动图记一次）。
+
+### 可靠性行为
+
+- **鉴权**：启动时用 `getMe` 校验 token；401/404 视为凭证或基址错误，直接停止重连
+  并打出可操作的日志，不会无限刷屏。
+- **重连**：指数退避 + 抖动（`reconnectMinMs` / `reconnectMaxMs`）；
+  `reconnectMaxAttempts=0` 表示无限重试。
+- **限流**：两次 Bot API 调用之间至少 `sendIntervalMs`；429 读
+  `parameters.retry_after` 等待后重试；5xx 与网络错误按退避重试，单条消息最多
+  3 次。
+- **去重**：Telegram 的 `message_id` 只在单个会话内唯一，适配器用
+  `${chat_id}:${message_id}` 生成入站 id，先按最近 1000 条记忆，桥内核再按
+  `platform:id` 去重 10 分钟；长轮询重发不会重复注入。
+- **过滤**：`telegram.groups` 限制允许的群、`telegram.privateUsers` 限制私聊对象，
+  `allowedUsers` 可进一步收窄发言人；被丢弃时会告警一次并打印可填进配置的
+  chat_id / user_id，方便收窄范围。
+- **群/私聊互通**：`telegram.syncChannels`（默认 `true`）把一条消息再发到除来源
+  会话之外的所有目标：群里发的进私聊、私聊发的进群。消息带 `[群]` / `[私聊]`
+  前缀；机器人自己发的消息不会触发入站，因此不会回环。媒体（`forwardMedia=true`）
+  跟在文字后面用 `file_id` 转发；没有群目标时会告警一次「私聊镜像暂时发不到群」，
+  补一条群消息或填上 `telegram.groups` 即可。
+- **出站目标（跨重启）**：`telegram.groups` / `telegram.privateUsers` 留空时，目标
+  取「收到过消息的会话」，写在宿主 `storage:kv`（键 `telegram:targets`），只在真的
+  新增/淘汰会话时写一次；未授予 `storage:kv` 时退化为进程内记忆。
+- **群升级**：普通群升级为超级群后 chat_id 会变；发送失败若带
+  `migrate_to_chat_id`，本次改用新 id 发送并告警，提示把 `telegram.groups` 更新为
+  新 id。
+- **注入安全**：与 QQ 相同，`tellraw` / `say` 都过滤控制字符，桥内核按注入文本做
+  60 秒回声抑制。
+
+### 已知限制
+
+- 单条消息上限 **4096** 字符（按 UTF-16 计长，适配器不会切断 emoji 代理对），
+  caption 上限 1024 字符；默认 `maxLength=3500` 留出余量。
+- 公开 Bot API 的 `getFile` 下载上限 **20 MB**；本适配器只复用 `file_id` 转发，
+  不下载文件，因此不受该限制影响，但 `file_id` 只对**同一个 bot** 有效。
+- 不订阅频道（`channel_post`）与编辑消息；需要时扩展 `allowed_updates` 即可，但要
+  同时调整去重键，否则编辑后的消息会被当成重复丢弃。
+- 长轮询意味着**一个 bot 只能有一个插件实例**消费更新；同一 token 配到两台宿主会
+  互相抢消息（409 冲突，双方轮流 `deleteWebhook` 并重试）。
+
+### 本地验证
+
+`test/telegram.test.ts` 用真实的 HTTP 假 Bot API（含长轮询挂起 / 唤醒）覆盖：配置
+解析、`getMe` 校验、入站归一化与白名单、learned targets、HTML 转义与分片、
+群/私聊镜像、媒体 `file_id`、论坛话题、429 重试、offset 持久化与重启、401 停止、
+409 `deleteWebhook`、停止后不再发送。真实联调只需把 `telegram.botToken` 换成
+@BotFather 发放的 token，并把机器人拉进群。
+
 ## 扩展一个新的聊天平台
 
-只需要三步，内核与 op 层都不用改。以下以 `telegram` 为例（QQ 已内置，可直接参照 `src/platforms/qq.ts`）。
+只需要三步，内核与 op 层都不用改。QQ 与 Telegram 已内置，可直接参照
+`src/platforms/qq.ts` / `src/platforms/telegram.ts`；下面用一个假想的 `matrix`
+说明最小骨架。
 
 ### 1. 实现 `PlatformFactory`
 
 ```ts
-// src/platforms/telegram.ts
+// src/platforms/matrix.ts
+import { formatOutbound } from "./format.js";
 import type { NormalizedMessage } from "../core/types.js";
 import type { ChatPlatform, PlatformFactory } from "./types.js";
 
-export const telegramPlatformFactory: PlatformFactory = {
-  id: "telegram",
-  title: "Telegram",
-  description: "Telegram Bot API",
+export const matrixPlatformFactory: PlatformFactory = {
+  id: "matrix",
+  title: "Matrix",
+  description: "Matrix 客户端 API",
   create({ log, settings }) {
-    const config = (settings ?? {}) as { token?: string; chatId?: string };
-    if (config.token === undefined || config.chatId === undefined) {
+    const config = (settings ?? {}) as { token?: string; roomId?: string };
+    if (config.token === undefined || config.roomId === undefined) {
       // 抛错会让启动失败，宿主按配置错误处理并回滚
-      throw new Error("telegram.token 与 telegram.chatId 必填");
+      throw new Error("matrix.token 与 matrix.roomId 必填");
     }
     return {
-      id: "telegram",
-      title: "Telegram",
-      async start(ctx) {
-        // 建立连接；ctx.game 用于 QQ/Telegram → 游戏，ctx.inbound 交给内核
-        log.info(`[telegram] 已启动`);
+      id: "matrix",
+      title: "Matrix",
+      start(ctx) {
+        // 建立连接；ctx.game 用于平台 → 游戏，ctx.inbound 交给内核
+        log.info("[matrix] 已启动");
       },
-      async deliver(message: NormalizedMessage) {
-        const text =
-          message.category === "chat" && message.from !== null
-            ? `[${message.from}]:${message.text}`
-            : message.text;
-        log.debug(`[telegram] ${text}`);
+      deliver(message: NormalizedMessage) {
+        // 出站格式由 format.ts 统一，平台之间不会漂移
+        log.debug(`[matrix] ${formatOutbound(message)}`);
       },
-      async stop(reason) {
-        log.debug(`[telegram] 断开：${reason}`);
+      stop(reason) {
+        log.debug(`[matrix] 断开：${reason}`);
       },
     } satisfies ChatPlatform;
   },
@@ -395,13 +548,14 @@ export const telegramPlatformFactory: PlatformFactory = {
 
 ```ts
 // src/platforms/index.ts
-import { telegramPlatformFactory } from "./telegram.js";
+import { matrixPlatformFactory } from "./matrix.js";
 
 export const BUILTIN_PLATFORMS: readonly PlatformFactory[] = [
   logPlatformFactory,
   nullPlatformFactory,
   qqPlatformFactory,
   telegramPlatformFactory,
+  matrixPlatformFactory,
 ];
 ```
 
@@ -409,18 +563,18 @@ export const BUILTIN_PLATFORMS: readonly PlatformFactory[] = [
 
 ```ts
 // src/config.ts，configSchema 内
-telegram: s.optional(
+matrix: s.optional(
   s.object(
     {
-      token: secretInput(s.string({ label: "Bot Token", max: 256 })),
-      chatId: s.string({ label: "默认会话", max: 64 }),
+      token: secretInput(s.string({ label: "Access Token", max: 512 })),
+      roomId: s.string({ label: "默认房间", max: 128 }),
     },
-    { label: "Telegram" },
+    { label: "Matrix" },
   ),
 ),
 ```
 
-之后配置 `"platforms": ["telegram"]` 就会实例化；`config.telegram` 这个片段会原样传给工厂的 `settings`。
+之后配置 `"platforms": ["matrix"]` 就会实例化；`config.matrix` 这个片段会原样传给工厂的 `settings`（schema 内的默认值已由 zod 补齐）。
 
 ### 适配器约定
 
@@ -462,11 +616,15 @@ npm run test:real   # 真实进程 + 真实 TCP 端点
 - 环形缓存、去重、游标分页、容量淘汰、过滤、超长文本截断、持续大量写入
 - 固定环队列、单平台保序、平台隔离、持续溢出丢最旧、平台启动失败回滚、停止排空
 - 桥的启动/停止/配置热更新/启动前配置/平台切换/过滤配置不重建/未知平台回滚
-- 配置默认值、去重、平台配置切片、QQ 配置片段与入站默认值、注册表重复与非法 id
+- 配置默认值、去重、平台配置切片、QQ / Telegram 配置片段与入站默认值、注册表重复与非法 id
 - 事件负载校验、非法时间回退、缺失服务器名兜底
 - **入站**：格式化注入、`inboundServer`、去重、截断、全局关闭、无 `console:write` 降级、回声抑制
 - **QQ**：配置校验与默认值、`[玩家名]:消息` 格式、官方入站事件归一（@ 映射/附件/引用）、
   假 Gateway 上的 Identify、被动回复 `msg_id+msg_seq`、白名单、去重、Markdown、401 刷新 token、分片与关闭码处理
+- **Telegram**：配置校验与默认值、假 Bot API 长轮询（挂起 / 唤醒 / offset 前进）、
+  `getMe` 校验、入站归一化与媒体占位、群/发言人白名单、learned targets、HTML 转义与
+  UTF-16 安全分片、群/私聊镜像、媒体 `file_id`、论坛话题、429 `retry_after` 重试、
+  offset 持久化与重启、401 停止重连、409 自动 `deleteWebhook`、停止后不再发送
 - **出站目标持久化**：跨实例读回群/私聊目标、重复会话不重复写盘、无 `storage:kv` 时退化、
   记录损坏按空处理、超上限淘汰、写入失败只告警一次；适配器侧覆盖「重启后仍镜像到记下的群」
   「首条群消息写回 KV」「无群目标时告警一次」
@@ -504,10 +662,10 @@ Windows 启动器经 `cmd.exe /d /s /c` 调用，并使用 `windowsVerbatimArgum
 
 ## 已知限制 / 下一步
 
-- 已内置 QQ 官方机器人（API v2）；Telegram、Discord 等平台可按同一契约继续添加。
-- 入站只处理文本与常见消息段（图片/语音/文件转为占位文本）；不支持图片内容落盘、回复链与话题线程。
-- QQ 官方机器人在群聊默认只能收到 @ 消息；全量群消息需在开放平台开通权限，并受官方主动消息频控约束。
-- 与真实 QQ 端联调需要用户提供 AppID/ClientSecret 与机器人环境；仓库内用真实 HTTP + WebSocket 假服务端验证协议链路。
+- 已内置 QQ 官方机器人（API v2）与 Telegram Bot API（长轮询）；Discord 等平台可按同一契约继续添加。
+- 入站只处理文本与常见消息段（图片/语音/文件转为占位文本）；不把媒体内容落盘。Telegram 的群/私聊镜像可直接复用 `file_id` 转发媒体；QQ 需要先转存平台素材库。QQ 不支持回复链与话题线程，Telegram 支持论坛话题（`message_thread_id`）。
+- QQ 官方机器人在群聊默认只能收到 @ 消息；全量群消息需在开放平台开通权限，并受官方主动消息频控约束。Telegram 需要在 BotFather 关闭 privacy mode 才能收到群内全部消息。
+- 与真实 QQ / Telegram 端联调需要用户提供 QQ AppID/ClientSecret、Telegram bot token 与机器人环境；仓库内 QQ 用真实 HTTP + WebSocket 假服务端、Telegram 用真实 HTTP 长轮询假服务端验证协议链路。
 - 插件静态订阅 `console:line`，无法运行期退订；高噪音环境靠 `consoleForward` / `forwardCategories` 控制转发。
 - 内存环形缓存，不落盘；需要历史时应由宿主查询或后续接持久化。
 - 尚未与真实 MCSUP 宿主 + Minecraft 服务器联调；真实宿主联调放在下一阶段。

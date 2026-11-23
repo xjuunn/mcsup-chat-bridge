@@ -406,7 +406,7 @@ export class ChatBridge {
       this.rememberEcho(line);
       this.inboundStats.delivered += 1;
       // 注入本身不产生可查询的记录（tellraw 只面向玩家），这里显式留一条日志，
-      // 便于 `mcsup plugin logs chat-bridge` 核对「QQ → 游戏」是否真的发生。
+      // 便于 `mcsup plugin logs chat-bridge` 核对「平台 → 游戏」是否真的发生。
       this.log.info(`[${job.platform}] 注入 ${server}：${line}`);
     } catch (error) {
       this.inboundStats.failed += 1;
@@ -437,7 +437,7 @@ export class ChatBridge {
 
   /**
    * 回声抑制：`tellraw` 注入后，若宿主把同一文本再作为聊天/控制台事件送回来，
-   * 记录并丢弃，避免「游戏 → QQ → 游戏」自激。
+   * 记录并丢弃，避免「游戏 → 平台 → 游戏」自激。
    */
   private isEcho(draft: MessageDraft): boolean {
     if (this.echoWindow.length === 0) {

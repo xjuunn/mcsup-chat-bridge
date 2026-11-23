@@ -36,6 +36,7 @@ import type { LogClient } from "mcsup-plugin";
 import { LearnedTargets } from "../core/targets.js";
 import { CATEGORIES } from "../core/types.js";
 import type { MessageCategory, NormalizedMessage } from "../core/types.js";
+import { formatOutbound, splitText } from "./format.js";
 import type {
   ChatPlatform,
   PlatformContext,
@@ -43,6 +44,9 @@ import type {
   PlatformFactory,
   PlatformInboundMessage,
 } from "./types.js";
+
+// 出站格式与分片由 `format.ts` 统一提供；这里再导出一次，保持既有引用稳定。
+export { formatOutbound } from "./format.js";
 
 // ---------------------------------------------------------------------------
 // 配置
@@ -167,17 +171,23 @@ export function parseQqSettings(raw: unknown): QqSettings {
   if (typeof raw !== "object" || raw === null) {
     throw new PluginError(
       "invalid_input",
-      "平台 qq 缺少配置：请填写 QQ 开放平台的 appId 与 clientSecret",
+      "平台 qq 缺少配置：请填写 QQ 开放平台的 appId 与 clientSecret；只用 Telegram 时请从 platforms 移除 qq",
     );
   }
   const record = raw as Record<string, unknown>;
   const appId = stringOf(record["appId"]);
   if (appId === undefined) {
-    throw new PluginError("invalid_input", "平台 qq 缺少 appId：请在 q.qq.com 机器人管理端获取");
+    throw new PluginError(
+      "invalid_input",
+      "平台 qq 缺少 appId：请在 q.qq.com 机器人管理端获取；只用 Telegram 时请从 platforms 移除 qq",
+    );
   }
   const clientSecret = stringOf(record["clientSecret"]);
   if (clientSecret === undefined) {
-    throw new PluginError("invalid_input", "平台 qq 缺少 clientSecret：请在 q.qq.com 机器人管理端获取");
+    throw new PluginError(
+      "invalid_input",
+      "平台 qq 缺少 clientSecret：请在 q.qq.com 机器人管理端获取；只用 Telegram 时请从 platforms 移除 qq",
+    );
   }
 
   const sandbox = boolOf(record["sandbox"], false);
@@ -235,37 +245,6 @@ function intentsOf(value: unknown): number {
   }
   return bits;
 }
-
-/**
- * 出站格式。
- *
- * 玩家聊天严格使用 `[玩家名]:消息`（需求指定的格式）；其他类别用中文类别标签，
- * 避免把「加入了游戏」渲染成 `[Alex]:加入了游戏` 这种歧义句式。
- */
-export function formatOutbound(message: NormalizedMessage): string {
-  const text = message.text.replace(/\r?\n/g, " ").trim();
-  if (text === "") {
-    return "";
-  }
-  if (message.category === "chat" && message.from !== null) {
-    return `[${message.from}]:${text}`;
-  }
-  const label = CATEGORY_LABELS[message.category];
-  return message.from === null ? `[${label}] ${text}` : `[${label}] ${message.from}: ${text}`;
-}
-
-const CATEGORY_LABELS: Record<MessageCategory, string> = {
-  chat: "聊天",
-  command: "命令",
-  join: "加入",
-  leave: "离开",
-  system: "系统",
-  warning: "警告",
-  error: "错误",
-  death: "死亡",
-  advancement: "进度",
-  other: "其他",
-};
 
 /**
  * 把 QQ 官方入站事件归一为纯文本。
@@ -1962,19 +1941,6 @@ function categoriesOf(value: unknown): MessageCategory[] | undefined {
     }
   }
   return out.length === 0 ? undefined : out;
-}
-
-function splitText(text: string, max: number): string[] {
-  // 按码点切分，避免把 emoji/代理对从中间截断
-  const points = Array.from(text);
-  if (points.length <= max) {
-    return [text];
-  }
-  const chunks: string[] = [];
-  for (let index = 0; index < points.length; index += max) {
-    chunks.push(points.slice(index, index + max).join(""));
-  }
-  return chunks;
 }
 
 function jitter(ms: number): number {

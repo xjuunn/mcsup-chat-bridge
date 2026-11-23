@@ -7,8 +7,8 @@
  * - 按会话（ctx）持有桥实例（WeakMap，支持同进程多个会话/测试宿主）
  * - 把宿主事件转给桥、把 op 查询转给桥
  *
- * 能力最小化：`console:write` 是高风险能力，只在 QQ → 游戏方向使用；宿主
- * 未授予时入站降级为仅计数，出站（游戏 → QQ）不受影响。
+ * 能力最小化：`console:write` 是高风险能力，只在 QQ / Telegram → 游戏方向使用；
+ * 宿主未授予时入站降级为仅计数，出站（游戏 → 平台）不受影响。
  */
 
 import { definePlugin, PluginError } from "mcsup-plugin";
@@ -61,7 +61,7 @@ function bridgeOf(ctx: object): ChatBridge {
  * 把宿主能力适配成 `GamePort`。
  *
  * 注入方式由 `injectMode` 决定：
- * - `tellraw @a <JSON 文本组件>`：游戏里只显示插件自己的标签（如 `[QQ]`），
+ * - `tellraw @a <JSON 文本组件>`：游戏里只显示插件自己的标签（如 `[QQ]` / `[Telegram]`），
  *   不会像 `say` 那样多出 `[Server]` 前缀；原版不会把它写进服务器日志。
  * - `say <文本>`：会写进服务器 `logs/latest.log`（`[Not Secure] [Server] ...`），
  *   且没有玩家在线时也能记录；代价是游戏内会多一个 `[Server]` 前缀。
@@ -72,7 +72,7 @@ function createGamePort(ctx: object, log: LogClient): GamePort | undefined {
   const caps = ctx as RuntimeCapabilities;
   const writer = caps["console:write"];
   if (writer === undefined) {
-    log.warn("未授予 console:write：QQ → 游戏方向不可用，桥将以仅出站模式运行");
+    log.warn("未授予 console:write：平台 → 游戏方向不可用，桥将以仅出站模式运行");
     return undefined;
   }
   const servers = caps["server:read"]?.servers;
@@ -128,21 +128,23 @@ export const plugin = definePlugin({
   resident: true,
   capabilities: ["events", "storage:kv", "console:read", "console:write", "server:read"],
   config: configSchema,
-  // 服务器绑定：`qq.server` 是「QQ 消息注入哪台服务器」，宿主据此让插件
-  // 跟随服务器启停——绑定的服务器启动前先拉起插件，全部停止后再收掉。
-  bind: { servers: ["qq.server"] },
+  // 服务器绑定：`inboundServer` 是「平台消息注入哪台服务器」，`qq.server` /
+  // `telegram.server` 是各适配器的覆盖值。宿主据此让插件跟随服务器启停——
+  // 绑定的服务器启动前先拉起插件，全部停止后再收掉。
+  bind: { servers: ["inboundServer", "qq.server", "telegram.server"] },
   // 安装向导：`mcsup plugin install` 会先列能力授权，再逐项问这些值，
-  // 写完后自动启用并启动，装完即可收发。只列「不填就用不了」的字段；
-  // 群/私聊 openid 可以留空，首条消息后从插件日志补。
+  // 写完后自动启用并启动，装完即可收发。只列「不填就收不到消息」的字段：
+  // 群/私聊 chat id 可以留空，首条消息后从插件日志补；`allowPrivate` 等
+  // 开关默认安全值，装完再用 `config set` 打开。
   setup: {
     fields: [
       {
         path: "platforms",
         required: true,
         default: ["qq"],
-        choices: ["qq", "log"],
+        choices: ["qq", "telegram", "log"],
         label: "启用的平台",
-        description: "QQ 官方机器人需要 qq；本地日志需要 log",
+        description: "QQ 官方机器人需要 qq；Telegram 需要 telegram；本地日志需要 log（可多选）",
       },
       {
         path: "injectMode",
@@ -150,32 +152,31 @@ export const plugin = definePlugin({
         default: "say",
         label: "游戏内注入方式",
         description:
-          "say（默认）：写入 logs/latest.log，游戏内会多出 [Server] 前缀；tellraw：只显示在游戏内、不写日志，游戏里只有 [QQ] 标签",
+          "say（默认）：写入 logs/latest.log，游戏内会多出 [Server] 前缀；tellraw：只显示在游戏内、不写日志，游戏里只有 [QQ]/[Telegram] 标签",
       },
       {
-        path: "qq.appId",
-        required: true,
-        label: "QQ AppID",
-        description: "QQ 开放平台 → 机器人管理端 → 开发设置",
-      },
-      {
-        path: "qq.clientSecret",
-        required: true,
-        secret: true,
-        label: "QQ ClientSecret",
-        description: "只用于换取 access_token，不会写入日志",
-      },
-      {
-        path: "qq.server",
+        path: "inboundServer",
         required: true,
         choicesFrom: "servers",
         label: "入站服务器",
-        description: "QQ 消息注入哪个服务器；从已注册服务器中选择",
+        description: "平台消息注入哪台服务器；从已注册服务器中选择（qq.server / telegram.server 可单独覆盖）",
       },
       {
-        path: "qq.allowPrivate",
-        label: "接收私聊消息",
-        description: "是否把 QQ 私聊消息注入游戏；默认关闭，避免陌生人打扰",
+        path: "qq.appId",
+        label: "QQ AppID（启用 qq 时填写）",
+        description: "QQ 开放平台 → 机器人管理端 → 开发设置；只用 Telegram 时留空回车跳过",
+      },
+      {
+        path: "qq.clientSecret",
+        secret: true,
+        label: "QQ ClientSecret（启用 qq 时填写）",
+        description: "只用于换取 access_token，不会写入日志；只用 Telegram 时留空回车跳过",
+      },
+      {
+        path: "telegram.botToken",
+        secret: true,
+        label: "Telegram Bot Token（启用 telegram 时填写）",
+        description: "Telegram 里找 @BotFather，用 /newbot 或 /token 获取；只用 QQ 时留空回车跳过",
       },
     ],
   },

@@ -385,7 +385,7 @@ export interface GamePort {
 | OpenClaw 的 health 状态 | Hello 心跳 + 最近错误日志；尚未暴露到 `status` |
 | 平台原生消息 → 宿主 | `GamePort.sendChat` 按 `injectMode` 用 `say`（默认，写 `latest.log`、游戏内多 `[Server]` 前缀）或 `tellraw @a`（单标签、不写服务器日志）注入；内核做 60 秒回声抑制 |
 
-**密钥与配置**：`qq.clientSecret` 用 SDK `secretInput` 标记为 `x-mcsup-secret`。宿主负责按插件隔离、加密持久化、管理读打码、握手下发明文；插件内部不再落盘，`clientSecret` 只发给官方凭证地址，OpenAPI 的 `access_token` 不写日志。
+**密钥与配置**：`qq.clientSecret` / `telegram.botToken` 用 SDK `secretInput` 标记为 `x-mcsup-secret`。宿主负责按插件隔离、加密持久化、管理读打码、握手下发明文；插件内部不再落盘，`clientSecret` 只发给官方凭证地址，Telegram token 只用于 Bot API URL（日志不打印完整 URL），OpenAPI 的 `access_token` 不写日志。
 
 ### 5.4 若要接更多真实平台，建议的演进顺序
 
@@ -397,6 +397,22 @@ export interface GamePort {
 4. **投递上下文**：线程/话题、回复、媒体、消息类型。可先加可选 `deliverContext`，避免破坏现有适配器。
 5. **多实例/多账户**：把平台 id 从「唯一实例」扩展为「id + account」，或允许配置数组。参考：OpenClaw `listAccountIds`、Hermes multiplex profiles。
 6. **入站方向已落地简化版**：适配器 → 内核 → `GamePort`。下一阶段是扩展 `PlatformInboundMessage`（回复链、媒体、线程）与把发送结果/健康态暴露到 `status`。
+
+### 5.5 Telegram 适配器的落地取舍
+
+`src/platforms/telegram.ts` 已按上面的契约实现 Telegram Bot API，并把本文提到的几个「平台细节」下沉到适配器：
+
+| 本文结论 | Telegram 落地 |
+| --- | --- |
+| 连接是长驻任务，停止要能中断 | `start()` 里跑 `run()` 长轮询循环；`stop` / `ctx.signal` 组合成 `AbortSignal` 中断在途 `getUpdates` 与退避 `sleep` |
+| 重连退避放框架层（此处先留在适配器） | 指数退避 + 抖动（`reconnectMinMs` / `reconnectMaxMs` / `reconnectMaxAttempts`）；401/404 直接停止并给出可操作日志 |
+| 同一 bot 只允许一个长轮询者 | 对应 OpenClaw 的 polling lease：不引入本地租约，而是检测 409 后自动 `deleteWebhook` 一次，仍冲突则退避 10 秒（同一 token 双实例最终会互相抢） |
+| 入站先归一化，鉴权/去重先于业务 | 文本 / caption + 媒体占位；`chat_id:message_id` 作为入站 id（Telegram 的 `message_id` 只在会话内唯一），白名单在归一化之后、`ctx.inbound` 之前 |
+| 出站要表达分片、线程、媒体、限流 | `maxLength`（UTF-16 安全分片）+ `parse_mode=HTML` 转义；论坛群记住 `message_thread_id`（General id=1 省略）；媒体复用 `file_id`；`sendIntervalMs` 节流、429 读 `retry_after`、5xx 退避 |
+| 平台故障不能拖垮其他平台 | 出站队列独立、单条失败只记 warn；分发层仍只调同步 `deliver` |
+| 目标 + 载荷 + 送达结果 | 暂未改契约：适配器内部重试并记录，`status` 仍只有 `queued/delivered/failed/dropped`（§5.4 第 1、2 条仍是下一步） |
+
+与 QQ 适配器的差异：Telegram 不需要「先上传素材」就能跨会话转发媒体（`file_id` 由同一 bot 持有），因此群/私聊镜像比 QQ 的 Markdown/富媒体转存链路短；反过来，Telegram 没有 QQ 的被动回复额度模型，限流主要靠本地 `sendIntervalMs` 与 429 响应。
 
 ---
 
@@ -417,7 +433,8 @@ export interface GamePort {
 
 - **OpenClaw 仍待补全**：`git sparse-checkout set src/channels src/gateway extensions/telegram` 的 promisor fetch 多次被网络重置（`curl 55 Send failure` / `Failed to connect`）。待网络稳定后重试；若 `.git/index.lock` 或 `sparse-checkout.lock` 残留，先确认没有 git 进程再删除。当前结论已由 GitHub API 快照覆盖核心路径。
 - **Hermes 已可本地复核**：`C:\Space\Projects\hermes-agent` 的 `gateway`、`plugins/platforms`、`hermes_platform` 已检出，可直接全文检索本文提到的符号与行号。
-- 若要落地真实平台，先选一个协议简单的（如 Telegram Bot API 或 Discord Webhook）做「最小适配器」，验证 `deliver` 结果语义与重连策略，再决定是否把监管上收。
+- 若要落地新的真实平台，先选一个协议简单的（如 Discord Webhook）做「最小适配器」，验证 `deliver` 结果语义与重连策略，再决定是否把监管上收。Telegram 已按该思路落地，可对照 `src/platforms/telegram.ts`。
 - QQ 官方机器人（API v2）的实现位于 `src/platforms/qq.ts`，并在 `scripts/real-host-check.mjs` 用真实 HTTP OpenAPI + WebSocket Gateway 假服务端做过协议级验证；真实 QQ 端联调需要用户提供 AppID/ClientSecret 与机器人环境。
+- Telegram 的实现位于 `src/platforms/telegram.ts`，用 `getUpdates` 长轮询（沙箱无公网入口，不用 webhook），offset 持久化到宿主 KV；`test/telegram.test.ts` 以真实 HTTP 假 Bot API（含长轮询挂起 / 唤醒）覆盖入站归一化、白名单、群私聊镜像、媒体 `file_id`、论坛话题、429 重试、offset 重启与 401/409 处理。真实联调需要用户提供 @BotFather 的 bot token 与机器人环境。
 - 官方协议参考：`bot.q.qq.com` 的 API 调用指南、消息收发概述、WebSocket 方式与 `GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE` 事件；实现细节可对照 Hermes `plugins/platforms/qqbot/adapter.py` 与 OpenClaw 的 `qqbot` 通道。
 - 补全 OpenClaw 后，重点核对 `ChannelManager` 的完整状态机（暂停/恢复、重启交接、关闭顺序）与 health monitor 的交接分支，这些在本文只覆盖了主路径。

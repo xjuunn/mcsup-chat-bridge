@@ -57,6 +57,26 @@ describe("配置解析", () => {
     expect(() => parse({ platforms: ["qq"], qq: { clientSecret: "s3cret" } })).toThrow();
   });
 
+  it("Telegram 配置片段随 platforms 一起下发", () => {
+    const config = resolveConfig(
+      parse({
+        platforms: ["telegram"],
+        telegram: { botToken: "123:abc", groups: ["-100"], syncChannels: false },
+      }),
+    );
+    expect(config.platformSettings.telegram).toMatchObject({
+      botToken: "123:abc",
+      groups: ["-100"],
+      syncChannels: false,
+      inbound: true,
+      allowPrivate: false,
+    });
+  });
+
+  it("Telegram 缺少 botToken 时 schema 拒绝", () => {
+    expect(() => parse({ platforms: ["telegram"], telegram: {} })).toThrow();
+  });
+
   it("入站开关与上限有默认值，且可覆盖", () => {
     const defaults = resolveConfig(parse({}));
     expect(defaults.inbound).toBe(true);
@@ -84,7 +104,7 @@ describe("平台注册表", () => {
 
   it("内置平台可列出", () => {
     const ids = createRegistry().list().map((info) => info.id);
-    expect(ids).toEqual(["log", "null", "qq"]);
+    expect(ids).toEqual(["log", "null", "qq", "telegram"]);
   });
 
   it("重复注册与非法 id 被拒绝", () => {

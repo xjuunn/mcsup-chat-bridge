@@ -46,6 +46,12 @@ assert(
   qqSecretSchema !== undefined && qqSecretSchema["x-mcsup-secret"] === true,
   "descriptor 未把 QQ clientSecret 标记为 x-mcsup-secret",
 );
+const telegramSecretSchema =
+  descriptor.schemas?.config?.properties?.telegram?.properties?.botToken;
+assert(
+  telegramSecretSchema !== undefined && telegramSecretSchema["x-mcsup-secret"] === true,
+  "descriptor 未把 Telegram botToken 标记为 x-mcsup-secret",
+);
 assert(
   Array.isArray(manifest.subscriptions) && manifest.subscriptions.includes("chat:message"),
   "manifest 未声明 chat:message 订阅",

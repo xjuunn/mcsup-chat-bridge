@@ -24,6 +24,9 @@ const LEAVE_BODY = /^([A-Za-z0-9_]{1,16}) left the game\.?$/;
 /** 日志级别：兼容 `[Server thread/INFO]:` 与 `[09:30:00 INFO]:` 两种前缀 */
 const LEVEL = /\[(?:[^\]]*\/)?(INFO|WARN|WARNING|ERROR|FATAL|SEVERE|DEBUG|TRACE)\]:?\s?/;
 
+/** 日志前缀的一层：`[12:00:01] `、`[Server thread/INFO]: `、`[12:00:01 INFO]: ` */
+const LOG_PREFIX = /^\[[^\]]*\]:?\s?/;
+
 /** 异常栈（`\tat ...` / `java.lang.XxxException:` / `Caused by:`） */
 const STACK = /^(?:\s+at\s|[A-Za-z0-9_$.]+(?:Exception|Error)(?::|\s|$)|Caused by:)/;
 
@@ -54,7 +57,7 @@ export type ConsoleResult =
 function bodyOf(line: string): string {
   let body = line;
   for (let i = 0; i < 4; i += 1) {
-    const next = body.replace(/^\[[^\]]*\]:?\s?/, "");
+    const next = body.replace(LOG_PREFIX, "");
     if (next === body) {
       break;
     }

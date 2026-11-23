@@ -52,6 +52,36 @@ assert(
   telegramSecretSchema !== undefined && telegramSecretSchema["x-mcsup-secret"] === true,
   "descriptor 未把 Telegram botToken 标记为 x-mcsup-secret",
 );
+// 安装向导的平台凭据靠 setup.fields[].when 条件提问：schema 必须是 4，
+// 且条件只能依赖排在前面的 platforms 字段，否则宿主会拒绝整个 descriptor。
+assert(
+  descriptor.schema === 4,
+  `descriptor.schema 应为 4（setup.when 需要），实际 ${descriptor.schema}`,
+);
+const setupFields = descriptor.setup?.fields ?? [];
+const fieldIndex = new Map(setupFields.map((field, index) => [field.path, index]));
+const platformsIndex = fieldIndex.get("platforms");
+assert(platformsIndex === 0, "setup 的第一个字段必须是 platforms（平台凭据的条件依赖它）");
+for (const [path, platform] of [
+  ["qq.appId", "qq"],
+  ["qq.clientSecret", "qq"],
+  ["telegram.botToken", "telegram"],
+]) {
+  const field = setupFields[fieldIndex.get(path)];
+  assert(field !== undefined, `setup 缺少 ${path} 字段`);
+  assert(
+    field.when?.path === "platforms" && field.when?.includes === platform,
+    `setup.${path} 的条件应为 platforms 包含 ${platform}，实际 ${JSON.stringify(field.when)}`,
+  );
+  assert(
+    (fieldIndex.get(path) ?? -1) > platformsIndex,
+    `setup.${path} 必须排在 platforms 之后，否则条件永远不成立`,
+  );
+  assert(
+    field.label !== undefined && !/[（(]/.test(field.label),
+    `setup.${path} 的标签不该带括号提示，实际「${field.label}」`,
+  );
+}
 assert(
   Array.isArray(manifest.subscriptions) && manifest.subscriptions.includes("chat:message"),
   "manifest 未声明 chat:message 订阅",

@@ -42,6 +42,10 @@ mcsup plugin install --from .\build
 
 仓库根目录仍然不能直接当安装源：那里只有 `file:` 链接与 `dist/`，缺 `manifest.json`。
 
+> 产物是 `descriptor schema 4`（安装向导用 `setup.fields[].when` 条件提问），需要
+> 支持该 schema 的宿主（`DESCRIPTOR_SCHEMA_VERSION = 4`）。更新宿主后旧的
+> `mcsup.exe` 会以 `unsupported descriptor schema 4, host supports 1..=3` 拒绝安装。
+
 安装会一次走完整个向导，装完即用：
 
 1. 列出插件申请的权限（`events` / `storage:kv` / `console:read` / `console:write` / `server:read`），
@@ -50,9 +54,10 @@ mcsup plugin install --from .\build
    - `启用的平台` 是多选框：`■`/`□` 表示是否选中，空格切换、回车确认；
    - `游戏内注入方式` 是单选项；`入站服务器` 从已注册服务器中单选（必填），
      还没有服务器时才退回手输；
-   - `QQ AppID` / `QQ ClientSecret` / `Telegram Bot Token` 三项**都是非必填**：
-     只用 QQ 就把 Bot Token 留空回车跳过，只用 Telegram 就把两项 QQ 凭据留空跳过；
-     对应平台缺少凭据时，适配器启动会以 `invalid_input` 明确报错（不会静默不出网）；
+   - `QQ AppID` / `QQ ClientSecret` / `Telegram Bot Token` 三项**按平台条件提问**：
+     平台里选了 `qq` 才会问前两项，选了 `telegram` 才会问 Bot Token，没选的平台
+     一个都不问（`setup.fields[].when`，需要支持 descriptor schema 4 的宿主）；
+     被问到时都是必填，留空会提示后重新提问；
    - 输入框**不会预填旧值**：留空即沿用，密钥每输入一个字符显示一个 `*`；
    - 必填项没有旧值可沿用时不能回车跳过，会提示后重新提问（`Ctrl+C` 取消）；
 3. 群 / 私聊 id **不用填**：留空即全部（入站不限会话，出站发给收到过消息的
@@ -268,8 +273,8 @@ URL。
 所以手工配置时先写完整的平台块，再写 `platforms` 等顶层键：
 
 安装向导不走这条路径：它用深度合并按字段写入，只改目标键，不会覆盖平台块的
-其它值，也不会把打码后的 `***` 写回；留空跳过的凭据不会创建对应片段。下面的
-手工写法只用于装完之后补改：
+其它值，也不会把打码后的 `***` 写回；而且只问**所选平台**需要的凭据，没选的
+平台不会创建对应片段。下面的手工写法只用于装完之后补改：
 
 ```powershell
 # 先写平台整块（内部双引号写成 \"，见文首安装说明）

@@ -122,7 +122,7 @@ function createTargetKv(ctx: object, log: LogClient): KvLike | undefined {
 export const plugin = definePlugin({
   id: "chat-bridge",
   title: "聊天桥",
-  version: "0.1.21",
+  version: "0.1.22",
   license: "MIT",
   description: "采集 Minecraft 聊天与控制台消息，按可插拔平台分发，并支持平台消息回流游戏",
   resident: true,
@@ -136,6 +136,8 @@ export const plugin = definePlugin({
   // 写完后自动启用并启动，装完即可收发。只列「不填就收不到消息」的字段：
   // 群/私聊 chat id 可以留空，首条消息后从插件日志补；`allowPrivate` 等
   // 开关默认安全值，装完再用 `config set` 打开。
+  // 平台凭据用 `when` 条件提问：没选 qq 就完全不问 QQ 凭据，反之亦然
+  // （`when` 需要宿主支持 descriptor schema 4）。
   setup: {
     fields: [
       {
@@ -163,20 +165,27 @@ export const plugin = definePlugin({
       },
       {
         path: "qq.appId",
-        label: "QQ AppID（启用 qq 时填写）",
-        description: "QQ 开放平台 → 机器人管理端 → 开发设置；只用 Telegram 时留空回车跳过",
+        required: true,
+        label: "QQ AppID",
+        description: "QQ 开放平台 → 机器人管理端 → 开发设置；只在启用了 qq 时询问",
+        // 条件提问：没选 qq 就不问、也不要求 QQ 凭据
+        when: { path: "platforms", includes: "qq" },
       },
       {
         path: "qq.clientSecret",
+        required: true,
         secret: true,
-        label: "QQ ClientSecret（启用 qq 时填写）",
-        description: "只用于换取 access_token，不会写入日志；只用 Telegram 时留空回车跳过",
+        label: "QQ ClientSecret",
+        description: "只用于换取 access_token，不会写入日志；只在启用了 qq 时询问",
+        when: { path: "platforms", includes: "qq" },
       },
       {
         path: "telegram.botToken",
+        required: true,
         secret: true,
-        label: "Telegram Bot Token（启用 telegram 时填写）",
-        description: "Telegram 里找 @BotFather，用 /newbot 或 /token 获取；只用 QQ 时留空回车跳过",
+        label: "Telegram Bot Token",
+        description: "Telegram 里找 @BotFather，用 /newbot 或 /token 获取；只在启用了 telegram 时询问",
+        when: { path: "platforms", includes: "telegram" },
       },
     ],
   },

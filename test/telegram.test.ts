@@ -260,7 +260,11 @@ async function startFakeTelegram(): Promise<FakeTelegram> {
       for (const entry of [...pending]) {
         entry.finish([]);
       }
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+      // 长轮询用的是 fetch（undici）的 keep-alive 连接：只调 `close()` 会一直等
+      // 空闲连接自然超时，干净跑几百次里总有一次撞上 afterEach 的 10s 超时。
+      server.closeAllConnections();
+      await closed;
     },
   };
 }

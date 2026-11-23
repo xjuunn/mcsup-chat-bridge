@@ -7,7 +7,7 @@ MCSUP 聊天桥插件：订阅 Minecraft 服务器的聊天、控制台与生命
 QQ 适配器支持**双向互通**：
 
 - 游戏 → QQ：玩家聊天按 `[玩家名]:消息` 发送到群/私聊；
-- QQ → 游戏：群聊消息（可选私聊）经 `console:write` 以 `tellraw @a` 注入游戏，显示为 `[QQ] 昵称: 消息`（只有一个标签）。
+- QQ → 游戏：群聊消息（可选私聊）经 `console:write` 注入游戏，显示为 `[QQ] 昵称: 消息`；注入方式由 `injectMode` 决定（默认 `say` 会写进服务器日志，`tellraw` 只显示在游戏内）。
 
 ## 快速开始
 
@@ -27,17 +27,19 @@ npm run verify
 
 ### 安装到 MCSUP 宿主
 
-`build/` 只是编译产物，运行期仍需要 `mcsup-plugin`、`ws`、`zod`；而本仓库的
-`mcsup-plugin` 是 `file:../mcsup/sdks/typescript`，npm 在 Windows 上会把它物化成
-Junction。宿主把产物内的任何符号链接视为不可信，会直接拒绝
-（`denied: symbolic link in artifact`），因此**不能把仓库根目录或 `build/` 直接
-当作安装源**。
+`npm run build` 产出的 `build/` 本身就是安装源：`mcsup-plugin build` 会编译 TypeScript、
+生成 `manifest.json` / `descriptor.json` / 启动器，并把运行期依赖（`mcsup-plugin`、`ws`、
+`zod`）以**真实目录** vendor 进 `build/node_modules/`。产物里没有符号链接，即使
+`mcsup-plugin` 在本仓库是 `file:../mcsup/sdks/typescript`（npm 在 Windows 上会物化成
+Junction），安装时也不会踩到宿主的 `denied: symbolic link in artifact`。
 
 ```powershell
-npm run stage        # 生成自包含产物 artifact/（真实目录依赖，无符号链接）
-mcsup plugin verify .\artifact   # 可选：安装前让宿主校验一次
-mcsup plugin install --from .\artifact
+npm run build
+mcsup plugin verify .\build      # 可选：安装前让宿主校验一次
+mcsup plugin install --from .\build
 ```
+
+仓库根目录仍然不能直接当安装源：那里只有 `file:` 链接与 `dist/`，缺 `manifest.json`。
 
 安装会一次走完整个向导，装完即用：
 
@@ -60,9 +62,8 @@ mcsup plugin install --from .\artifact
 脚本或 CI 用 `--yes` 视为同意能力授权；`--no-setup` 跳过整个向导，
 回到旧行为（装完需手动 `grant` / `config set` / `enable` / `start`）。
 
-`scripts/stage-artifact.mjs` 会复制 `build/`，只把 SDK 的 `dist` + `package.json`
-和 `ws`、`zod` 以真实目录放进 `artifact/node_modules/`，然后断言产物内没有符号
-链接、文件数与体积未超宿主上限，并用一次真实 ESM 解析自检。
+`npm run test:real` 会校验 `build/node_modules/` 里确实有 `mcsup-plugin`、`ws`、`zod`，
+产物一旦退回「只编译、不 vendor」的状态就会直接失败，避免装到一半才发现解析不到依赖。
 
 > 依赖 `mcsup-plugin@0.1.0`，通过 `file:../mcsup/sdks/typescript` 引用同级的 SDK 仓库。`scripts/ensure-sdk.mjs` 会比较 SDK 源码与 `dist/index.js` 的 mtime：缺失或过期时用 SDK 自带的 tsc 重新构建，已是最新时零开销。
 
@@ -87,14 +88,14 @@ src/
   events/normalize.ts       宿主事件校验（zod）与归一化
   config.ts                 配置 schema（含 QQ 与密钥字段）、resolveConfig
   ops/index.ts              messages（table + 分页）与 status（detail，含入站统计）
-  index.ts                  definePlugin 接线、能力声明、GamePort（tellraw）
+  index.ts                  definePlugin 接线、能力声明、GamePort（say / tellraw）
 scripts/
   ensure-sdk.mjs            SDK 缺失或过期（mtime）时自动构建
   real-host-check.mjs       真实子进程 + 真实 TCP 假宿主 + 真实 QQ 官方协议（REST + Gateway）
 test/                       分类、存储、分发、桥、入站、QQ、配置、事件、MockHost
 ```
 
-构建产物在 `build/`：`manifest.json`、`descriptor.json`、`bin/run.cmd|run.sh`、`bin/entry.mjs`、`dist/`。`npm run stage` 会把它连同运行期依赖整理成可安装的 `artifact/`。
+构建产物在 `build/`：`manifest.json`、`descriptor.json`、`bin/run.cmd|run.sh`、`bin/entry.mjs`、`dist/`、`node_modules/`（vendor 的运行期依赖）。整个目录可直接 `mcsup plugin install --from`。
 
 ## 消息模型
 
@@ -334,8 +335,9 @@ messages { "server": "survival", "limit": 20 }
 
 - `AppID/ClientSecret` 换 token，Identify 的 `token` 为 `QQBot <access_token>`、默认 intents 为 `group_and_c2c`；
 - 游戏事件 → `POST /v2/groups/<openid>/messages`，`msg_type=0`、文本为 `[Steve]:有人吗`、带 `msg_seq`；
-- QQ 群消息事件 → 宿主 `console:write/send_line`，命令为
-  `tellraw @a {"text":"[QQ] 小A: 来自QQ"}`；
+- QQ 群消息事件 → 宿主 `console:write/send_line`，命令为默认注入方式
+  `say [QQ] 小A: 来自QQ`；把 `injectMode` 热更新成 `tellraw` 后再来一条，命令变成
+  `tellraw @a {"text":"[QQ] 小A: 切换注入方式"}`；
 - 非白名单群与重复消息 id 不会二次注入；
 - `status.inbound` 计数正确，进程最终以退出码 0 结束。
 
@@ -472,10 +474,13 @@ npm run test:real   # 真实进程 + 真实 TCP 端点
 6. 调用 `status` 验证采集、跳过、分类与三个平台的投递计数
 7. 断言 OpenAPI 收到 `POST /v2/groups/123456/messages`，`msg_type=0`、文本为 `[Steve]:有人吗`
 8. 推送 `GROUP_AT_MESSAGE_CREATE`，断言宿主收到 `console:write/send_line`
-   `tellraw @a {"text":"[QQ] 小A: 来自QQ"}`；非白名单群与重复消息 id 不注入
-9. 下发 `config` 验证热更新只影响转发，三平台计数一致
+   `say [QQ] 小A: 来自QQ`（默认注入方式）；非白名单群与重复消息 id 不注入
+9. 下发 `config` 验证热更新只影响转发，三平台计数一致；同时把 `injectMode` 切成
+   `tellraw`，断言下一条入站变成 `tellraw @a {"text":"[QQ] 小A: 切换注入方式"}`
 10. `ping` / `pong`，检查日志平台的真实 stderr 输出
-11. `shutdown`，断言退出码 0
+11. 断言插件只调用了已声明的宿主方法（假宿主的返回形状按真宿主 `api.rs` 给，
+   写能力回 `{ok:true}`，读能力回文档结构），漂移即失败
+12. `shutdown`，断言退出码 0
 
 说明：本机没有可启动的 Minecraft 服务器与真实 MCSUP 宿主，也没有真实 QQ 凭证，所以对端是“假宿主 + 假 QQ 开放平台”，但它们跑的是真实帧协议、真实进程、真实 socket、真实 HTTP 与真实 WebSocket 握手；插件侧的分类、分发、QQ 协议与入站注入逻辑没有被 mock。
 

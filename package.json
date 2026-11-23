@@ -16,7 +16,6 @@
     "test": "vitest run",
     "prebuild": "node scripts/ensure-sdk.mjs",
     "build": "mcsup-plugin build --out build",
-    "stage": "npm run build && node scripts/stage-artifact.mjs",
     "pretest:real": "node scripts/ensure-sdk.mjs",
     "test:real": "node scripts/real-host-check.mjs",
     "verify": "npm run typecheck && npm run test && npm run build && npm run test:real"

@@ -1,5 +1,4 @@
 node_modules/
 build/
-artifact/
 *.log
 .DS_Store

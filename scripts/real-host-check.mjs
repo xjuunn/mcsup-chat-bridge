@@ -57,6 +57,14 @@ assert(
   Array.isArray(descriptor.ops) && descriptor.ops.some((op) => op.id === "status"),
   "descriptor 缺少 status op",
 );
+// `mcsup-plugin build` 会把运行时依赖以真实目录 vendor 进 build/，所以 build/
+// 本身就是可直接安装的产物；少掉这一层说明产物不自包含，装上会解析不到依赖。
+for (const dep of ["mcsup-plugin", "ws", "zod"]) {
+  assert(
+    existsSync(path.join(buildDir, "node_modules", dep, "package.json")),
+    `build/ 未 vendor 运行时依赖 ${dep}，产物不自包含`,
+  );
+}
 
 const server = net.createServer();
 server.on("error", (error) => fail(`宿主监听失败：${error.message}`));

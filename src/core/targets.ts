@@ -120,6 +120,17 @@ export class LearnedTargets {
     return [...this.groupList];
   }
 
+  /** 忘记一个会话（例如机器人被移出群）；只有真的存在才落盘 */
+  public forget(kind: "group" | "private", id: string): void {
+    const list = kind === "group" ? this.groupList : this.userList;
+    const index = list.indexOf(id);
+    if (index === -1) {
+      return;
+    }
+    list.splice(index, 1);
+    void this.persist();
+  }
+
   /** 私聊目标（按首次出现顺序） */
   public users(): readonly string[] {
     return [...this.userList];

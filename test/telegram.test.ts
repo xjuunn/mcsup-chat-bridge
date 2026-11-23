@@ -357,6 +357,24 @@ function groupUpdate(
   };
 }
 
+/** 机器人自身的入群 / 被踢事件；`status` 对应 new_chat_member.status */
+function membershipUpdate(
+  updateId: number,
+  chatId: number,
+  status: "member" | "administrator" | "left" | "kicked",
+): Record<string, unknown> {
+  return {
+    update_id: updateId,
+    my_chat_member: {
+      chat: { id: chatId, type: "supergroup", title: "MC 群", username: "mc_group" },
+      from: { id: 7, is_bot: false, first_name: "Bob" },
+      date: UNIX,
+      old_chat_member: { status: "left", user: { id: 999, is_bot: true } },
+      new_chat_member: { status, user: { id: 999, is_bot: true } },
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // 配置与纯函数
 // ---------------------------------------------------------------------------
@@ -583,6 +601,38 @@ describe("Telegram 适配器（假 Bot API）", () => {
       .map((call) => String(call.body["text"] ?? ""))
       .join("");
     expect(joined).toBe(`[Steve]:${long}`);
+  });
+
+  it("机器人入群事件直接学习出站目标，不必等群消息", async () => {
+    const fake = await startFakeTelegram();
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    const { platform } = startPlatform(fake, {}, inbound);
+
+    fake.push(membershipUpdate(1, -100, "member"));
+    await waitFor(() => fake.offsets.includes(2), "入群事件确认");
+    expect(inbound).toEqual([]);
+
+    platform.deliver(message({ text: "游戏消息" }));
+    await waitFor(() => fake.sends.length === 1, "发到群");
+    expect(fake.sends[0]?.body["chat_id"]).toBe("-100");
+    expect(logText(fake.log)).toContain("已加入群");
+  });
+
+  it("机器人被移出群后忘记该出站目标", async () => {
+    const fake = await startFakeTelegram();
+    cleanup.push(() => fake.close());
+    const { platform } = startPlatform(fake, {});
+
+    fake.push(membershipUpdate(1, -100, "member"));
+    await waitFor(() => fake.offsets.includes(2), "入群事件确认");
+    fake.push(membershipUpdate(2, -100, "kicked"));
+    await waitFor(() => fake.offsets.includes(3), "离开事件确认");
+
+    platform.deliver(message());
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(fake.sends).toEqual([]);
+    expect(logText(fake.log)).toContain("已移出出站目标");
   });
 
   it("群/私聊互相同步，并跳过来源会话", async () => {

@@ -77,7 +77,7 @@ export interface TelegramSettings {
 }
 
 const DEFAULT_API_BASE = "https://api.telegram.org";
-const USER_AGENT = "mcsup-chat-bridge/0.1.21 (TelegramBotAdapter)";
+const USER_AGENT = "mcsup-chat-bridge/0.1.23 (TelegramBotAdapter)";
 
 /** Telegram 单条文本上限 */
 const TEXT_LIMIT = 4_096;
@@ -388,6 +388,15 @@ export class TelegramPlatform implements ChatPlatform {
     if (ctx.signal.aborted) {
       return;
     }
+    if (this.settings.groups.length === 0) {
+      // 群 chat_id 不用手填：入群事件与群消息都会自动学习目标。但「群里发了
+      // 没反应」最常见的原因是 BotFather 的隐私模式还开着——普通群消息根本
+      // 不会推给机器人，适配器只能看到私聊。启动时先说清楚，省得翻文档。
+      this.log.info(
+        "[telegram] 群聊提示：BotFather /setprivacy 关闭隐私模式后把机器人移出群再拉回，" +
+          "群内普通消息才会推给机器人；chat_id 会从入群事件或群消息自动学习，无需手填",
+      );
+    }
     ctx.signal.addEventListener(
       "abort",
       () => {
@@ -514,7 +523,7 @@ export class TelegramPlatform implements ChatPlatform {
         offset: this.offset,
         timeout: timeoutSecs,
         limit: this.settings.pollLimit,
-        allowed_updates: ["message"],
+        allowed_updates: ["message", "my_chat_member"],
       },
       budget,
     );
@@ -591,10 +600,48 @@ export class TelegramPlatform implements ChatPlatform {
     }
     // 只处理新消息；edited_message 的 message_id 与原文相同，会被去重挡掉。
     const message = objectOf(record["message"]);
-    if (message === undefined) {
+    if (message !== undefined) {
+      this.onMessage(message);
       return;
     }
-    this.onMessage(message);
+    // 入群 / 被踢：不产生聊天消息，但入群时可以立刻学到出站目标，
+    // 不必等群里先开口（尤其是改完隐私模式、把机器人重新拉回群的流程）。
+    const membership = objectOf(record["my_chat_member"]);
+    if (membership !== undefined) {
+      this.onMembership(membership);
+    }
+  }
+
+  private onMembership(update: Record<string, unknown>): void {
+    const chat = objectOf(update["chat"]);
+    if (chat === undefined) {
+      return;
+    }
+    const type = stringOf(chat["type"]);
+    if (type !== "group" && type !== "supergroup") {
+      return;
+    }
+    const chatId = idOf(chat["id"]);
+    if (chatId === undefined) {
+      return;
+    }
+    const member = objectOf(update["new_chat_member"]);
+    const status = stringOf(member?.["status"]);
+    const title = chatTitle(chat);
+    const name = title === undefined ? "" : `「${title}」`;
+    if (status === "member" || status === "administrator") {
+      const known = this.learned.groups().includes(chatId);
+      this.learnChannel(true, chatId);
+      if (!known) {
+        this.log.info(
+          `[telegram] 机器人已加入群${name}（chat_id=${chatId}），已记为出站目标；` +
+            "群内普通消息要能进来，还需在 BotFather /setprivacy 关闭隐私模式",
+        );
+      }
+    } else if (status === "left" || status === "kicked") {
+      this.learned.forget("group", chatId);
+      this.log.info(`[telegram] 机器人已离开群${name}（chat_id=${chatId}），已移出出站目标`);
+    }
   }
 
   private onMessage(message: Record<string, unknown>): void {
@@ -821,7 +868,8 @@ export class TelegramPlatform implements ChatPlatform {
     }
     this.warnedNoMirror = true;
     this.log.warn(
-      "[telegram] 私聊镜像暂时发不到群：还没有记录到任何群会话（在群里发一条消息即可自动补齐，或把 telegram.groups 填成群 chat_id）",
+      "[telegram] 私聊镜像暂时发不到群：还没有记录到任何群会话" +
+        "（把机器人拉进群即可自动记录，或在群里发一条消息；也可把 telegram.groups 填成群 chat_id）",
     );
   }
 
@@ -868,7 +916,10 @@ export class TelegramPlatform implements ChatPlatform {
             this.settings.groups.length + this.settings.privateUsers.length + this.learned.size > 0;
           if (!hasAny && !this.warnedNoTarget) {
             this.warnedNoTarget = true;
-            this.log.warn("[telegram] 还没有可用的会话目标（等收到第一条群/私聊消息后自动补齐）");
+            this.log.warn(
+              "[telegram] 还没有可用的会话目标（收到群/私聊消息或机器人入群后会自动补齐；" +
+                "群内普通消息需先在 BotFather 关闭隐私模式）",
+            );
           }
           continue;
         }
@@ -1299,5 +1350,18 @@ function sleep(ms: number): Promise<void> {
 }
 
 function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+  // undici 的网络错误只有一句 `fetch failed`，真正的原因（ENOTFOUND /
+  // ECONNRESET / 证书错误）在 `cause` 里。日志里带上它，才能区分「没网」
+  // 与「token / API 被拒绝」。
+  const cause = (error as { cause?: unknown }).cause;
+  if (cause instanceof Error && cause.message !== error.message) {
+    const code = (cause as NodeJS.ErrnoException).code;
+    return code === undefined
+      ? `${error.message}（${cause.message}）`
+      : `${error.message}（${code}: ${cause.message}）`;
+  }
+  return error.message;
 }

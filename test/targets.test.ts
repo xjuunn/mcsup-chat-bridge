@@ -102,6 +102,34 @@ describe("出站目标记忆", () => {
     expect(reloaded.groups()).toEqual(["g2", "g3"]);
   });
 
+  it("被移出群后可以忘记该目标，并落盘", async () => {
+    const kv = new FakeKv();
+    const learned = new LearnedTargets({ key: "k", kv, log: fakeLog() });
+    learned.remember("group", "g1");
+    learned.remember("group", "g2");
+    await flushed();
+
+    learned.forget("group", "g1");
+    await flushed();
+    expect(learned.groups()).toEqual(["g2"]);
+
+    const reloaded = new LearnedTargets({ key: "k", kv, log: fakeLog() });
+    await reloaded.load();
+    expect(reloaded.groups()).toEqual(["g2"]);
+  });
+
+  it("忘记不存在的目标不写盘", async () => {
+    const kv = new FakeKv();
+    const learned = new LearnedTargets({ key: "k", kv, log: fakeLog() });
+    learned.remember("group", "g1");
+    await flushed();
+    expect(kv.writes).toBe(1);
+
+    learned.forget("group", "nope");
+    await flushed();
+    expect(kv.writes).toBe(1);
+  });
+
   it("写入失败只告警一次，本次会话仍可用", async () => {
     const kv = new FakeKv();
     kv.failSet = true;

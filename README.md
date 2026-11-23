@@ -424,7 +424,8 @@ messages { "server": "survival", "limit": 20 }
    私聊不受此限制。修改后需要把机器人移出群再拉回（或重启会话）才生效。
 3. 把机器人拉进目标群即可。**chat_id / user id 不用手填**：`telegram.groups` /
    `telegram.privateUsers` 留空即全部（入站不限会话，出站发给收到过消息的会话，
-   记录持久化在宿主 `storage:kv`，重启不丢）；需要收窄范围时再填 chat_id。
+   记录持久化在宿主 `storage:kv`，重启不丢）；拉群时会直接记下群 chat_id，
+   也可以发一条群消息让它学习。需要收窄范围时再填 chat_id。
    Telegram 的群 id 是负数（超级群/论坛群形如 `-1001234567890`），私聊 id 是正数；
    两者都能从 `mcsup plugin logs chat-bridge` 的入站日志里看到。
 4. **论坛群（话题）**：适配器会记住收到的 `message_thread_id`，出站回到同一个话题；
@@ -436,8 +437,10 @@ messages { "server": "survival", "limit": 20 }
 
 - **入站**：`POST {apiBase}/bot{token}/getUpdates`，带 `offset`（最后确认的
   `update_id + 1`）、`timeout`（长轮询秒数）、`limit` 与
-  `allowed_updates: ["message"]`。只处理新消息；`edited_message` 的 `message_id`
-  与原文相同，会被去重挡掉，因此不订阅。
+  `allowed_updates: ["message", "my_chat_member"]`。只处理新消息；`edited_message`
+  的 `message_id` 与原文相同，会被去重挡掉，因此不订阅。`my_chat_member` 用来
+  捕获机器人入群 / 被移出：入群即记下群 chat_id 作为出站目标（不必等群里先开口），
+  被移出则忘掉该目标。
 - **出站**：`POST /sendMessage`，`parse_mode: "HTML"`，文本按 `&` / `<` / `>`
   转义后发送；超长按 `maxLength` 分片。媒体用 `sendPhoto` / `sendVideo` /
   `sendAnimation` / `sendDocument`，直接复用 Telegram 的 `file_id`（不下载、
@@ -480,7 +483,8 @@ messages { "server": "survival", "limit": 20 }
   补一条群消息或填上 `telegram.groups` 即可。
 - **出站目标（跨重启）**：`telegram.groups` / `telegram.privateUsers` 留空时，目标
   取「收到过消息的会话」，写在宿主 `storage:kv`（键 `telegram:targets`），只在真的
-  新增/淘汰会话时写一次；未授予 `storage:kv` 时退化为进程内记忆。
+  新增/淘汰会话时写一次；未授予 `storage:kv` 时退化为进程内记忆。机器人入群时
+  从 `my_chat_member` 直接记下群目标，被移出时忘记它。
 - **群升级**：普通群升级为超级群后 chat_id 会变；发送失败若带
   `migrate_to_chat_id`，本次改用新 id 发送并告警，提示把 `telegram.groups` 更新为
   新 id。
@@ -497,6 +501,22 @@ messages { "server": "survival", "limit": 20 }
   同时调整去重键，否则编辑后的消息会被当成重复丢弃。
 - 长轮询意味着**一个 bot 只能有一个插件实例**消费更新；同一 token 配到两台宿主会
   互相抢消息（409 冲突，双方轮流 `deleteWebhook` 并重试）。
+
+### 排障：消息只走一边
+
+先看 `mcsup plugin logs chat-bridge`，按日志定位，不要猜：
+
+| 现象 | 日志 | 原因 / 处理 |
+| --- | --- | --- |
+| 游戏里说话，Telegram 收不到 | `还没有可用的会话目标` | 出站目标还没学到。把机器人拉进群（入群事件会自动记录），或在群里发一条消息；也可以显式填 `telegram.groups` |
+| 群里发消息，游戏里没反应 | 没有 `收到群消息：chat_id=...` | BotFather 的**隐私模式**还开着（`/setprivacy` → `Disable`），然后必须把机器人移出群再拉回；只改开关不重拉不生效。若日志里出现「丢弃群消息」，按括号里的原因处理 |
+| 群里发消息，日志有 `收到群消息` 但游戏没反应 | `注入 <server>` / `未注入` | 目标服务器没在运行、`inbound=false`，或 `inboundServer` 选了别的服务器；看注入日志里的服务器名 |
+| 私聊没反应 | `丢弃私聊（私聊未启用…）` | 默认不接私聊；需要时 `mcsup plugin config set chat-bridge telegram.allowPrivate true`（注意陌生人也能私聊机器人） |
+| 偶发 `fetch failed` | 后面跟着 `N ms 后重试` | 到 `api.telegram.org` 的网络抖动（代理 / TUN 切换时常见）；新版本会把 `cause`（`ECONNRESET` / `ENOTFOUND` 等）一起打出来。持续失败再检查代理 |
+
+定位顺序固定为：**有没有收到更新** → **有没有目标** → **有没有注入**。
+`mcsup plugin logs chat-bridge` 里三条关键日志分别是 `收到群消息`、
+`已加入群` / `还没有可用的会话目标`、`注入 <server>`。
 
 ### 本地验证
 

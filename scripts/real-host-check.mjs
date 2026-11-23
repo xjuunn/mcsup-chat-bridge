@@ -200,6 +200,15 @@ const exitPromise = new Promise((resolve) => {
 
 const frames = [];
 const hostCalls = [];
+// 宿主能力的返回形状由 SDK 按 `<capability>.<method>` 逐字段校验，形状不符会
+// 抛 `host returned an invalid ...`。这里照真宿主（`crates/plugin/src/api.rs`）
+// 的形状给，写能力是 `{ok:true}` 确认，读能力按文档结构返回。
+const hostReplies = new Map([
+  ["console:write/send_line", () => ({ ok: true })],
+  ["server:read/list", () => ({ servers: [{ name: "survival", status: "running", version: null }] })],
+  ["console:read/tail", () => ({ lines: [], next: 0 })],
+]);
+const unexpectedCalls = [];
 let buffer = "";
 let socket;
 try {
@@ -234,13 +243,22 @@ socket.on("data", (chunk) => {
         fail(`收到非 JSON 帧：${line}`);
       }
       if (frame.type === "call") {
-        // 插件调用宿主能力：记录并给出可断言的默认响应
+        // 插件调用宿主能力：记录下来，并按 `hostReplies` 给出合同形状的返回
         hostCalls.push(frame);
-        let output = null;
-        if (frame.capability === "server:read" && frame.method === "list") {
-          output = [{ name: "survival", status: "running" }];
+        const key = `${frame.capability}/${frame.method}`;
+        const reply = hostReplies.get(key);
+        if (reply === undefined) {
+          // 插件调了没在表里的方法：契约漂移，记下来让测试失败
+          unexpectedCalls.push(key);
+          send({
+            type: "result",
+            id: frame.id,
+            ok: false,
+            error: { code: "unsupported", message: `不支持的宿主调用：${key}` },
+          });
+          continue;
         }
-        send({ type: "result", id: frame.id, ok: true, output });
+        send({ type: "result", id: frame.id, ok: true, output: reply() });
         continue;
       }
       frames.push(frame);
@@ -360,7 +378,6 @@ try {
   emit(1, "chat:message", {
     from: "Steve",
     text: "\u00a7a有人吗",
-    at: at(1),
     at: at(1),
   });
   emit(2, "chat:message", { from: "Steve", text: "/help", at: at(2) });
@@ -544,11 +561,12 @@ try {
   }
   assert(injection !== undefined, "QQ 消息未通过 console:write 注入游戏");
   assert(injection.input.server === "survival", `注入服务器应为 survival，实际 ${injection.input.server}`);
+  // 默认注入方式是 `say`：会写进服务器日志，代价是游戏内多一个 [Server] 前缀
   assert(
-    injection.input.line === `tellraw @a ${JSON.stringify({ text: "[QQ] 小A: @Bob 来自QQ" })}`,
+    injection.input.line === "say [QQ] 小A: @Bob 来自QQ",
     `注入命令不符：${injection.input.line}`,
   );
-  successCases.push("QQ 群消息经 console:write 以 tellraw @a 注入游戏，且把 @ 映射为昵称并移除机器人自身 @");
+  successCases.push("QQ 群消息经 console:write 以默认 say 注入游戏，且把 @ 映射为昵称并移除机器人自身 @");
 
   // 其他群不在白名单：不应进入游戏
   const beforeBlocked = hostCalls.filter((c) => c.capability === "console:write").length;
@@ -608,6 +626,8 @@ try {
     values: {
       platforms: ["log", "null", "qq"],
       forwardCategories: ["chat"],
+      // 顺带把注入方式改成 tellraw：验证热更新后的下一条入站走另一条命令形状
+      injectMode: "tellraw",
       qq: {
         appId: qqAppId,
         clientSecret: qqSecret,
@@ -660,6 +680,39 @@ try {
   );
   successCases.push("出站优先使用最近入站 msg_id 做被动回复");
 
+  // ---- 注入方式随配置热更新切换：say → tellraw -------------------------
+  qqSocket.send(
+    JSON.stringify({
+      op: 0,
+      s: 5,
+      t: "GROUP_AT_MESSAGE_CREATE",
+      d: {
+        id: "91003",
+        group_openid: "123456",
+        content: "切换注入方式",
+        author: { member_openid: "u20002", member_nickname: "小A" },
+      },
+    }),
+  );
+  const tellrawDeadline = Date.now() + 5_000;
+  let tellraw;
+  while (tellraw === undefined && Date.now() < tellrawDeadline) {
+    tellraw = hostCalls.find(
+      (callFrame) =>
+        typeof callFrame.input?.line === "string" &&
+        callFrame.input.line.includes("切换注入方式"),
+    );
+    if (tellraw === undefined) {
+      await delay(20);
+    }
+  }
+  assert(tellraw !== undefined, "配置热更新后的入站消息未注入游戏");
+  assert(
+    tellraw.input.line === `tellraw @a ${JSON.stringify({ text: "[QQ] 小A: 切换注入方式" })}`,
+    `tellraw 注入命令不符：${tellraw.input.line}`,
+  );
+  successCases.push("injectMode 热更新后入站改用 tellraw @a，且不写服务器日志");
+
   // ---- 心跳与平台适配器实际输出 ----------------------------------------
   send({ type: "ping", n: 7 });
   const pong = await waitFor((f) => f.type === "pong" && f.n === 7, "pong 7");
@@ -668,6 +721,19 @@ try {
   assert(stderr.includes("日志平台已就绪"), "日志平台未输出就绪日志");
   assert(stderr.includes("[chat-bridge]") && stderr.includes("有人吗"), "日志平台未收到并输出聊天消息");
   successCases.push("ping/pong 与日志平台的真实投递输出");
+
+  // ---- 宿主调用契约 -----------------------------------------------------
+  assert(
+    unexpectedCalls.length === 0,
+    `插件调用了假宿主未声明的方法：${[...new Set(unexpectedCalls)].join(", ")}`,
+  );
+  const ackCalls = hostCalls.filter((c) => c.capability === "console:write");
+  assert(ackCalls.length > 0, "插件应至少调用一次 console:write.send_line");
+  assert(
+    ackCalls.every((c) => c.method === "send_line" && typeof c.input?.line === "string"),
+    "console:write 只应调用 send_line 并带 line",
+  );
+  successCases.push("宿主调用只用到已声明的 console:write.send_line，返回确认被插件接受");
 
   // ---- 退出 -------------------------------------------------------------
   send({ type: "shutdown", grace_ms: 2_000 });

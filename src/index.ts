@@ -210,6 +210,8 @@ export const plugin = definePlugin({
         when: { path: "platforms", includes: "discord" },
       },
       {
+        // 扫码登录会顺带给出 iLink 基址；它写在 config schema 里，由同一次
+        // 登录回填，不作为 setup 字段提问。
         path: "weixin.botToken",
         required: true,
         secret: true,
@@ -217,14 +219,6 @@ export const plugin = definePlugin({
         label: "微信 Bot Token",
         description:
           "用手机微信扫描终端里的二维码授权，token 由插件直接写回；只在启用了 weixin 时询问",
-        when: { path: "platforms", includes: "weixin" },
-      },
-      {
-        // 扫码结果里的 baseurl 在机器人所属区域不是默认地址时才有值；由同一个
-        // 登录回填，本次已填好就不会再问。留空表示使用默认地址。
-        path: "weixin.apiBase",
-        label: "微信 iLink 地址",
-        description: "扫码登录会同时写入服务端建议的基址；留空使用默认 https://ilinkai.weixin.qq.com",
         when: { path: "platforms", includes: "weixin" },
       },
     ],

@@ -65,8 +65,9 @@ mcsup plugin install --from .\build
      （`setup.fields[].when`，需要支持 descriptor schema 4 的宿主）；被问到时都是必填，
      留空会提示后重新提问。微信 token 不能从后台复制：宿主支持 descriptor schema 5 时
      **安装向导会直接拉起插件完成扫码**（`setup.fields[].interactive`），二维码经
-     `MCSUP_SETUP_UI_FILE` 交给宿主按终端宽度居中渲染；扫码后 token（以及服务端建议的
-     `weixin.apiBase`）经 0600 临时文件一次回传，不用手工复制，也不再重复问基址。旧宿主
+     `MCSUP_SETUP_UI_FILE` 交给宿主按终端宽度居中渲染；扫码后 token 经 0600 临时文件
+     回传，不用手工复制。服务端建议的 iLink 基址（`weixin.apiBase`）**不是提问项**：
+     它写在 config schema 里，由同一次扫码自动回填；扫码没给时适配器用默认地址。旧宿主
      会退回单 token 回传与插件自绘二维码，可先运行 `node scripts/weixin-login.mjs` 扫码再粘贴；
    - 输入框**不会预填旧值**：留空即沿用，密钥每输入一个字符显示一个 `*`；
    - 必填项没有旧值可沿用时不能回车跳过，会提示后重新提问（`Ctrl+C` 取消）；

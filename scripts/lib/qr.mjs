@@ -361,12 +361,13 @@ export function qrMatrix(text, options = {}) {
  * 用上下半块把两行合成一行，并强制黑字 / 白底：深色模块画成黑色，浅色
  * 模块留白，因此深色终端主题下也能被手机正确识别。
  *
- * 静默区按二维码规范保留 4 个模块（左右各 4 列，上下各 2 行文本，每行
- * 文本对应 2 行模块）。少了静默区，很多手机扫不出紧贴字符边缘的二维码。
+ * 静默区取 2 个模块（左右各 2 列，上下各 1 行文本，每行文本对应 2 行模块）：
+ * 规范建议 4，但屏幕上每多一格就多一圈白色边带，2 格已经能让手机稳定定位，
+ * 整幅二维码也小一圈。
  */
 export function renderQrTerminal(matrix, options = {}) {
   const size = matrix.length;
-  const quiet = options.quiet ?? 4;
+  const quiet = options.quiet ?? 2;
   const width = size + quiet * 2;
   const pad = " ".repeat(quiet);
   const blank = `\x1b[30;47m${" ".repeat(width)}\x1b[0m`;

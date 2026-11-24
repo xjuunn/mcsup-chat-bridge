@@ -99,11 +99,11 @@ describe("qr", () => {
 
   it("渲染时保留静默区，并用上下半块合并两行", () => {
     const lines = renderQrTerminal(qrMatrix("hello")).split("\n");
-    // 21 个模块行 → 11 行文本，上下各 2 行静默区
-    expect(lines).toHaveLength(11 + 4);
-    // 每行 4 个模块的左右静默区 → 21 + 8 个可见字符
+    // 21 个模块行 → 11 行文本，上下各 1 行静默区（2 个模块）
+    expect(lines).toHaveLength(11 + 2);
+    // 每行 2 个模块的左右静默区 → 21 + 4 个可见字符
     const widths = new Set(lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").length));
-    expect([...widths]).toEqual([29]);
+    expect([...widths]).toEqual([25]);
   });
 
   it("qrTerminal 等于矩阵渲染", () => {

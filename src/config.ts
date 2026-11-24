@@ -567,7 +567,7 @@ export const configSchema = s.object({
             max: 512,
             label: "Bot Token",
             describe:
-              "先运行 `node scripts/weixin-login.mjs` 扫码登录，脚本会打印 token；形如 wxbot_...（只用于 Authorization: Bearer，不会写入日志）",
+              "安装向导会拉起扫码脚本自动写入；手动运行 `node scripts/weixin-login.mjs` 也会打印 token。形如 wxbot_...（只用于 Authorization: Bearer，不会写入日志）",
           }),
         ),
         apiBase: s.optional(
@@ -575,7 +575,7 @@ export const configSchema = s.object({
             max: 512,
             label: "iLink 基址",
             describe:
-              "默认 https://ilinkai.weixin.qq.com；扫码登录返回的 baseurl 不同时再改",
+              "扫码登录会自动写入服务端建议的地址，不需要手填；留空使用默认 https://ilinkai.weixin.qq.com",
           }),
         ),
         privateUsers: s.optional(

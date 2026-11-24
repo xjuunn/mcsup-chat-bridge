@@ -7,7 +7,7 @@ import {
   TargetBook,
   type OutboundTarget,
   type QueueItem,
-} from "../src/platforms/shared/outbound.js";
+} from "../src/platform-kit/shared/outbound.js";
 import type { KvLike } from "../src/core/targets.js";
 
 function fakeLog(): LogClient & {

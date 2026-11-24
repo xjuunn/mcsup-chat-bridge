@@ -3,14 +3,14 @@ import type { LogClient } from "mcsup-plugin";
 
 import { ChatBridge, type BridgeConfig } from "../src/core/bridge.js";
 import { CATEGORIES } from "../src/core/types.js";
-import { createRegistry } from "../src/platforms/index.js";
+import { createRegistry } from "../src/builtin-platforms.js";
 import type {
   ChatPlatform,
   GamePort,
   InjectMode,
   PlatformContext,
   PlatformRelayMessage,
-} from "../src/platforms/types.js";
+} from "../src/platform-kit/types.js";
 
 const AT = "2026-11-21T12:00:00.000Z";
 

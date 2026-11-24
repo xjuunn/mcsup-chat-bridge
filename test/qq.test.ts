@@ -15,7 +15,7 @@ import {
   qqInboundImages,
   qqInboundText,
 } from "../src/platforms/qq.js";
-import type { PlatformInboundMessage } from "../src/platforms/types.js";
+import type { PlatformInboundMessage } from "../src/platform-kit/types.js";
 
 const AT = "2026-11-21T12:00:00.000Z";
 

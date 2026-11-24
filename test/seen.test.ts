@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_SEEN_LIMIT, MessageSeen } from "../src/platforms/shared/seen.js";
+import { DEFAULT_SEEN_LIMIT, MessageSeen } from "../src/platform-kit/shared/seen.js";
 
 describe("MessageSeen", () => {
   it("记住的消息才算见过", () => {

@@ -327,7 +327,7 @@ Telegram 适配器（`plugins/platforms/telegram/adapter.py`）承担平台细�
 ### 5.1 当前契约
 
 ```ts
-// src/platforms/types.ts（节选）
+// src/platform-kit/types.ts（节选）
 export interface ChatPlatform {
   readonly id: string;
   readonly title: string;
@@ -387,7 +387,7 @@ export interface GamePort {
 | OpenClaw 的 health 状态 | Hello 心跳 + 最近错误日志；尚未暴露到 `status` |
 | 平台原生消息 → 宿主 | `GamePort.sendChat` 按 `injectMode` 用 `say`（默认，写 `latest.log`、游戏内多 `[Server]` 前缀）或 `tellraw @a`（单标签、不写服务器日志）注入；内核做 60 秒回声抑制 |
 
-**密钥与配置**：`qq.clientSecret` / `telegram.botToken` 用 SDK `secretInput` 标记为 `x-mcsup-secret`。宿主负责按插件隔离、加密持久化、管理读打码、握手下发明文；插件内部不再落盘，`clientSecret` 只发给官方凭证地址，Telegram token 只用于 Bot API URL（日志不打印完整 URL），OpenAPI 的 `access_token` 不写日志。
+**密钥与配置**：`qq.clientSecret` / `telegram.botToken` / `discord.botToken` 用 SDK `secretInput` 标记为 `x-mcsup-secret`。宿主负责按插件隔离、加密持久化、管理读打码、握手下发明文；插件内部不再落盘，`clientSecret` 只发给官方凭证地址，Telegram token 只用于 Bot API URL（日志不打印完整 URL），Discord token 只用于 `Authorization: Bot` 头，OpenAPI 的 `access_token` 不写日志。
 
 ### 5.4 若要接更多真实平台，建议的演进顺序
 
@@ -418,24 +418,40 @@ export interface GamePort {
 
 ### 5.6 跨平台同步：`relay` 作为可选能力
 
-QQ 与 Telegram 各自内部的群↔私聊镜像（`syncChannels`）只解决「同一平台内两个会话」的互通，不能让 QQ 与 Telegram 互相看到消息。跨平台同步因此单独做一条边，判定收敛在内核：
+QQ、Telegram 与 Discord 各自内部的群↔私聊镜像（`syncChannels`）只解决「同一平台内两个会话」的互通，不能让三个平台互相看到消息。跨平台同步因此单独做一条边，判定收敛在内核：
 
 - 内核（`ChatBridge.handleInbound`）在去重、截断之后，把同一条入站消息投给**除来源平台之外、实现了 `relay` 的平台**；来源平台由 `PlatformDispatcher.relay` 按 `platform.id` 排除。
-- `relay` 是可选方法：`log` / `null` 不实现，就自然收不到转发；QQ / Telegram 实现后自动接入，内核不需要按平台 id 特判。这与 OpenClaw/Hermes 的「适配器之间两两对接」不同，新平台只要实现一个方法就能参与全互连。
+- `relay` 是可选方法：`log` / `null` 不实现，就自然收不到转发；QQ / Telegram / Discord 实现后自动接入，内核不需要按平台 id 特判。这与 OpenClaw/Hermes 的「适配器之间两两对接」不同，新平台只要实现一个方法就能参与全互连。
 - 转发只写适配器自己的出站队列，**不回流 `ctx.inbound`**：入站路径只走一次，qq → telegram → qq 的环不存在，也不需要依赖平台侧回声窗口。
-- 跨平台不做媒体搬运：QQ 的图片要先转存 `qqbot-media://`，Telegram 的 `file_id` 只对同一个 bot 有效，两边不对称。正文里的 `[图片]` / `[视频]` 等占位原样保留，让接收方知道原消息带媒体。
-- 文本格式由 `src/platforms/format.ts` 的 `formatRelay` 统一：`[QQ 群] 昵称: 消息` / `[Telegram 私聊] 昵称: 消息`，接收方一眼看出说话的平台与场所。
+- 跨平台不做媒体搬运：QQ 的图片要先转存 `qqbot-media://`，Telegram 的 `file_id` 只对同一个 bot 有效，Discord 的附件是临期签名 URL；三种句柄互不通用。正文里的 `[图片]` / `[视频]` 等占位原样保留，让接收方知道原消息带媒体。
+- 文本格式由 `src/platform-kit/format.ts` 的 `formatRelay` 统一：`[QQ 群] 昵称: 消息` / `[Telegram 私聊] 昵称: 消息` / `[Discord 群] 昵称: 消息`，接收方一眼看出说话的平台与场所。
 - 与 `inbound` 解耦：关掉入站只影响「平台 → 游戏」，平台之间仍同步；`crossPlatform=false` 则只保留游戏与各平台的双向，平台之间不串。
-- 计费影响：双向全转发会让发送量翻倍，需对照 QQ 主动消息频控（1000 条/天/群）与 Telegram 约 20 条/分钟/群的限制；高频服务器可只保留 `chat` 类别或关闭 `crossPlatform`。
+- 计费影响：双向全转发会让发送量翻倍，需对照 QQ 主动消息频控（1000 条/天/群）、Telegram 约 20 条/分钟/群的限制与 Discord 的 Gateway/REST 限流；高频服务器可只保留 `chat` 类别或关闭 `crossPlatform`。
 
 ### 5.7 私聊同步：顶层开关 + 适配器并集
 
-群↔私聊镜像与跨平台同步都建立在「这条私聊已经进得来」之上；此前私聊默认被各平台的 `allowPrivate=false` 挡在适配器门口，装完插件的人收不到私聊，还要自己去翻两个平台各自的开关。
+群↔私聊镜像与跨平台同步都建立在「这条私聊已经进得来」之上；此前私聊默认被各平台的 `allowPrivate=false` 挡在适配器门口，装完插件的人收不到私聊，还要自己去翻各平台自己的开关。
 
 - 顶层 `privateSync`（默认 `false`）一次决定所有已选平台：安装向导里只问一次「同步私聊消息」，不再按平台分别问，也不按平台 id 特判。
 - 下发路径是 `PlatformCreateOptions.private`，适配器用 `settings.allowPrivate || private`（取并集）判定。选并集而不是覆盖，是为了不把平台里显式打开的 `allowPrivate` 关掉；全局关掉时也仍是「按平台配置」的旧语义。
 - 它是**创建选项**而非运行期字段：`dispatcherUnchanged` 比较 `privateSync`，变化即重建适配器，否则适配器会一直按旧值拒收私聊。
 - 私聊进来后不区分对待：与新消息同一条链路，参与注入游戏、镜像与跨平台转发，因此不新增第二条判定路径。
+
+### 5.8 Discord 适配器的落地取舍
+
+`src/platforms/discord.ts` 用 **Bot Gateway（出站 WebSocket）+ REST API v10**，不复用 Webhook：插件跑在宿主沙箱里，没有公网入口。与本文结论的对应：
+
+| 本文结论 | Discord 落地 |
+| --- | --- |
+| 连接是长驻任务，停止要能中断 | Hello → Identify → 心跳；`stop` / `ctx.signal` 组合成 `AbortSignal` 中断网关、心跳与退避等待 |
+| 重连退避放框架层（此处先留在适配器） | 指数退避 + 抖动；优先 op 6 Resume（`session_id` + `seq`），`4007` / `4009` 清 session 重新 Identify，`4004` / `4010`–`4014` 致命停止 |
+| 同一 bot 只允许一个连接 | 单分片单连接；Gateway 返回 `4010` / `4011` 时停止并说明「超出单分片」 |
+| 入站先归一化，鉴权/去重先于业务 | `MESSAGE_CREATE` → `PlatformInboundMessage`；`message_id` 全局唯一直接作入站 id；`guilds` / `groups` / `allowedUsers` 白名单在归一化之后、`ctx.inbound` 之前 |
+| 出站要表达分片、线程、媒体、限流 | `maxLength` 码点分片（默认 1900）、`allowed_mentions: {parse: []}`、`sendIntervalMs` 节流；429 读 `retry_after`，5xx/网络错误退避，401/403/404 不重试 |
+| 目标 + 载荷 + 送达结果 | 与 QQ / Telegram 相同：契约仍是同步 `deliver`，适配器内部队列重试；`status` 计数口径不变 |
+| 平台故障不能拖垮其他平台 | 出站队列与 Gateway 循环各自收口，单条失败只记 warn |
+
+会话映射与其他平台不同的一点：频道（`channel_id`）对应 `group`，DM 频道对应 `private`。`privateUsers` 配置的是 **user id**，发送前经 `POST /users/@me/channels`（`recipient_id`）换成 DM `channel_id` 并缓存；学习到的私聊目标已经是 DM `channel_id`。入站媒体在文本里保留 `[图片]` 等占位，`forwardMedia` 只把图片 URL 作为 embed 立即镜像，不下载/上传，因此跨平台转发仍只带文本。
 
 ---
 
@@ -456,8 +472,9 @@ QQ 与 Telegram 各自内部的群↔私聊镜像（`syncChannels`）只解决�
 
 - **OpenClaw 仍待补全**：`git sparse-checkout set src/channels src/gateway extensions/telegram` 的 promisor fetch 多次被网络重置（`curl 55 Send failure` / `Failed to connect`）。待网络稳定后重试；若 `.git/index.lock` 或 `sparse-checkout.lock` 残留，先确认没有 git 进程再删除。当前结论已由 GitHub API 快照覆盖核心路径。
 - **Hermes 已可本地复核**：`C:\Space\Projects\hermes-agent` 的 `gateway`、`plugins/platforms`、`hermes_platform` 已检出，可直接全文检索本文提到的符号与行号。
-- 若要落地新的真实平台，先选一个协议简单的（如 Discord Webhook）做「最小适配器」，验证 `deliver` 结果语义与重连策略，再决定是否把监管上收。Telegram 已按该思路落地，可对照 `src/platforms/telegram.ts`。
+- 若要落地新的真实平台，先选一个协议简单的做「最小适配器」，验证 `deliver` 结果语义与重连策略，再决定是否把监管上收。Telegram、Discord 都已按该思路落地，可分别对照 `src/platforms/telegram.ts` / `src/platforms/discord.ts`。
 - QQ 官方机器人（API v2）的实现位于 `src/platforms/qq.ts`，并在 `scripts/real-host-check.mjs` 用真实 HTTP OpenAPI + WebSocket Gateway 假服务端做过协议级验证；真实 QQ 端联调需要用户提供 AppID/ClientSecret 与机器人环境。
 - Telegram 的实现位于 `src/platforms/telegram.ts`，用 `getUpdates` 长轮询（沙箱无公网入口，不用 webhook），offset 持久化到宿主 KV；`test/telegram.test.ts` 以真实 HTTP 假 Bot API（含长轮询挂起 / 唤醒）覆盖入站归一化、白名单、群私聊镜像、媒体 `file_id`、论坛话题、429 重试、offset 重启与 401/409 处理。真实联调需要用户提供 @BotFather 的 bot token 与机器人环境。
-- 官方协议参考：`bot.q.qq.com` 的 API 调用指南、消息收发概述、WebSocket 方式与 `GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE` 事件；实现细节可对照 Hermes `plugins/platforms/qqbot/adapter.py` 与 OpenClaw 的 `qqbot` 通道。
+- Discord 的实现位于 `src/platforms/discord.ts`，用出站 Bot Gateway + REST v10（不用 Webhook / Interactions Endpoint）；`test/discord.test.ts` 以真实 HTTP 假 REST + WebSocket 假 Gateway 覆盖 Identify、频道/私聊入站、白名单、learned targets、DM 解析、分片、镜像与图片 embed、`relay`、429 重试、401 停止与关闭码分支。真实联调需要用户提供 Developer Portal 的 bot token，并打开 Message Content Intent。
+- 官方协议参考：`bot.q.qq.com` 的 API 调用指南、消息收发概述、WebSocket 方式与 `GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE` 事件；实现细节可对照 Hermes `plugins/platforms/qqbot/adapter.py` 与 OpenClaw 的 `qqbot` 通道。Discord 参考 `discord.com/developers/docs` 的 Gateway 生命周期、op 2/6/10/11 与 REST 限流说明。
 - 补全 OpenClaw 后，重点核对 `ChannelManager` 的完整状态机（暂停/恢复、重启交接、关闭顺序）与 health monitor 的交接分支，这些在本文只覆盖了主路径。

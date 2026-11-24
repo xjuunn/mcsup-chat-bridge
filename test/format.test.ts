@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatRelay, splitText } from "../src/platforms/format.js";
+import { formatRelay, splitText } from "../src/platform-kit/format.js";
 
 describe("跨平台转发文本格式", () => {
   it("带上来源平台与群/私聊，接收方一眼看出说话的地方", () => {

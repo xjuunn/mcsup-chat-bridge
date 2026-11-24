@@ -52,6 +52,12 @@ assert(
   telegramSecretSchema !== undefined && telegramSecretSchema["x-mcsup-secret"] === true,
   "descriptor 未把 Telegram botToken 标记为 x-mcsup-secret",
 );
+const discordSecretSchema =
+  descriptor.schemas?.config?.properties?.discord?.properties?.botToken;
+assert(
+  discordSecretSchema !== undefined && discordSecretSchema["x-mcsup-secret"] === true,
+  "descriptor 未把 Discord botToken 标记为 x-mcsup-secret",
+);
 // 安装向导的平台凭据靠 setup.fields[].when 条件提问：schema 必须是 4，
 // 且条件只能依赖排在前面的 platforms 字段，否则宿主会拒绝整个 descriptor。
 assert(
@@ -66,6 +72,7 @@ for (const [path, platform] of [
   ["qq.appId", "qq"],
   ["qq.clientSecret", "qq"],
   ["telegram.botToken", "telegram"],
+  ["discord.botToken", "discord"],
 ]) {
   const field = setupFields[fieldIndex.get(path)];
   assert(field !== undefined, `setup 缺少 ${path} 字段`);

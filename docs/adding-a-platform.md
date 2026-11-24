@@ -8,7 +8,8 @@
 
 ## 1. 三条链路与生命周期
 
-适配器只实现 `ChatPlatform`（`src/platforms/types.ts`）：
+适配器只实现 `ChatPlatform`（`src/platform-kit/types.ts`）。目录职责固定：
+`src/platform-kit/` 放契约与公共件，`src/platforms/` 只放适配器，每个文件一个平台。
 
 | 方法 | 方向 | 谁调用 | 必须做什么 |
 | --- | --- | --- | --- |
@@ -25,8 +26,8 @@
 
 ```
 src/config.ts                # 配置 schema + 安装向导字段
-src/platforms/<id>.ts        # 适配器（工厂 + parse<Id>Settings）
-src/platforms/index.ts       # BUILTIN_PLATFORMS 注册一行
+src/platforms/<id>.ts        # 适配器（工厂 + parse<Id>Settings），只放平台实现
+src/builtin-platforms.ts     # BUILTIN_PLATFORMS 注册一行
 test/<id>.test.ts            # 协议收发用例
 test/helpers/platform-contract.ts  # 契约断言（复用）
 scripts/real-host-check.mjs  # 真实宿主装配检查（含 setup 字段）
@@ -67,7 +68,7 @@ matrix: s.optional(
 
 `parse<Id>Settings(raw: unknown)` 在工厂阶段一次性把 JSON 转成强类型，
 缺凭据抛 `PluginError("invalid_input", ...)`（宿主据此回滚配置，不会半启动）。
-取值统一用 `src/platforms/shared/values.ts`，不要自己写 `objectOf` 之类的解析：
+取值统一用 `src/platform-kit/shared/values.ts`，不要自己写 `objectOf` 之类的解析：
 
 | 需求 | 函数 |
 | --- | --- |
@@ -80,7 +81,7 @@ matrix: s.optional(
 ### 3.3 出站：直接用共享队列
 
 发到多个会话的行为各平台完全一致，全部收敛在
-`src/platforms/shared/outbound.ts`：目标解析（配置留空 = 学到的会话）、
+`src/platform-kit/shared/outbound.ts`：目标解析（配置留空 = 学到的会话）、
 排除来源会话、串行发送、积压上限、单目标失败计数、一次性告警。
 
 ```ts
@@ -135,7 +136,7 @@ private allowPrivate(): boolean {
 
 ### 3.5 重连与等待
 
-`src/platforms/shared/runtime.ts` 提供 `jitter` / `sleep` / `abortableSleep` /
+`src/platform-kit/shared/runtime.ts` 提供 `jitter` / `sleep` / `abortableSleep` /
 `errorText`。退避等待必须用 `abortableSleep(ms, ...signals)`，否则插件停止时
 会多等一个完整退避周期；日志错误用 `errorText`，它会展开 `fetch` 的 `cause`
 （`ECONNRESET` / 证书错误），否则只剩一句 `fetch failed`。
@@ -143,14 +144,17 @@ private allowPrivate(): boolean {
 ### 3.6 注册
 
 ```ts
-// src/platforms/index.ts
+// src/builtin-platforms.ts（组合根，只做装配）
+import { matrixPlatformFactory } from "./platforms/matrix.js";
+
 export const BUILTIN_PLATFORMS: readonly PlatformFactory[] = [
-  logPlatformFactory, nullPlatformFactory, qqPlatformFactory, telegramPlatformFactory,
-  matrixPlatformFactory,
+  discordPlatformFactory, logPlatformFactory, nullPlatformFactory,
+  qqPlatformFactory, telegramPlatformFactory, matrixPlatformFactory,
 ];
 ```
 
-`src/platforms/registry.ts` 会校验 id 形状与实例 id 一致性，重复登记直接抛错。
+`src/platform-kit/registry.ts` 会校验 id 形状与实例 id 一致性，重复登记直接抛错。
+新增平台只动自己的适配器文件、注册行与配置，不要改动其它平台的适配器，也不要把公共件塞回该目录。
 
 ## 4. 硬性约束
 

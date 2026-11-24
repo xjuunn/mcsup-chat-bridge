@@ -12,7 +12,7 @@ import {
   telegramInboundMedia,
   telegramInboundText,
 } from "../src/platforms/telegram.js";
-import type { PlatformInboundMessage } from "../src/platforms/types.js";
+import type { PlatformInboundMessage } from "../src/platform-kit/types.js";
 
 const AT = "2026-11-23T12:00:00.000Z";
 const TOKEN = "123456:TEST-TOKEN";

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { PlatformDispatcher } from "../src/core/dispatcher.js";
 import type { NormalizedMessage } from "../src/core/types.js";
-import type { ChatPlatform, PlatformRelayMessage } from "../src/platforms/types.js";
+import type { ChatPlatform, PlatformRelayMessage } from "../src/platform-kit/types.js";
 import type { LogClient } from "mcsup-plugin";
 
 const AT = "2026-11-21T12:00:00.000Z";

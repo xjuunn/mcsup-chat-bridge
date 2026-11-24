@@ -6,7 +6,7 @@
  */
 
 import type { NormalizedMessage } from "../core/types.js";
-import type { ChatPlatform, PlatformFactory } from "./types.js";
+import type { ChatPlatform, PlatformFactory } from "../platform-kit/types.js";
 
 export interface LogPlatformSettings {
   readonly prefix?: string;

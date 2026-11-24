@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { PluginError, toZod } from "mcsup-plugin";
 
 import { configSchema, resolveConfig, type RawConfig } from "../src/config.js";
-import { createRegistry } from "../src/platforms/index.js";
-import type { PlatformFactory } from "../src/platforms/types.js";
+import { createRegistry } from "../src/builtin-platforms.js";
+import type { PlatformFactory } from "../src/platform-kit/types.js";
 
 const parse = (values: unknown): RawConfig => toZod(configSchema).parse(values) as RawConfig;
 
@@ -77,6 +77,35 @@ describe("配置解析", () => {
     expect(() => parse({ platforms: ["telegram"], telegram: {} })).toThrow();
   });
 
+  it("Discord 配置片段随 platforms 一起下发", () => {
+    const config = resolveConfig(
+      parse({
+        platforms: ["discord"],
+        discord: {
+          botToken: "discord-token",
+          guilds: ["100"],
+          groups: ["200"],
+          privateUsers: ["300"],
+          allowPrivate: true,
+        },
+      }),
+    );
+    expect(config.platformSettings.discord).toMatchObject({
+      botToken: "discord-token",
+      guilds: ["100"],
+      groups: ["200"],
+      privateUsers: ["300"],
+      allowPrivate: true,
+      inbound: true,
+      syncChannels: true,
+      maxLength: 1900,
+    });
+  });
+
+  it("Discord 缺少 botToken 时 schema 拒绝", () => {
+    expect(() => parse({ platforms: ["discord"], discord: {} })).toThrow();
+  });
+
   it("入站开关与上限有默认值，且可覆盖", () => {
     const defaults = resolveConfig(parse({}));
     expect(defaults.inbound).toBe(true);
@@ -108,7 +137,7 @@ describe("平台注册表", () => {
 
   it("内置平台可列出", () => {
     const ids = createRegistry().list().map((info) => info.id);
-    expect(ids).toEqual(["log", "null", "qq", "telegram"]);
+    expect(ids).toEqual(["discord", "log", "null", "qq", "telegram"]);
   });
 
   it("重复注册与非法 id 被拒绝", () => {

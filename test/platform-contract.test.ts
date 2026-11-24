@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { PluginError } from "mcsup-plugin";
 
-import { BUILTIN_PLATFORMS } from "../src/platforms/index.js";
-import { PlatformRegistry } from "../src/platforms/registry.js";
+import { BUILTIN_PLATFORMS } from "../src/builtin-platforms.js";
+import { discordPlatformFactory } from "../src/platforms/discord.js";
+import { PlatformRegistry } from "../src/platform-kit/registry.js";
 import { expectPlatformContract, PLATFORM_ID } from "./helpers/platform-contract.js";
 
 /** 不需要凭据即可实例化的内置平台；QQ / Telegram 缺凭据应当拒绝启动 */
@@ -18,6 +19,10 @@ describe("平台契约（内置适配器）", () => {
     });
   }
 
+  it("discord 满足最小契约", async () => {
+    await expectPlatformContract(discordPlatformFactory, { settings: { botToken: "test-token" } });
+  });
+
   it("所有内置平台的 id 与标题合法，且互不重名", () => {
     const ids = BUILTIN_PLATFORMS.map((factory) => factory.id);
     expect(new Set(ids).size).toBe(ids.length);
@@ -27,7 +32,7 @@ describe("平台契约（内置适配器）", () => {
     }
   });
 
-  for (const id of ["qq", "telegram"]) {
+  for (const id of ["qq", "telegram", "discord"]) {
     it(`${id} 缺凭据时按 invalid_input 拒绝，而不是运行期崩溃`, () => {
       const registry = new PlatformRegistry();
       for (const factory of BUILTIN_PLATFORMS) {

@@ -20,14 +20,14 @@ import { PluginError } from "mcsup-plugin";
 import type { EventMeta, LogClient } from "mcsup-plugin";
 
 import { normalizeEvent } from "../events/normalize.js";
-import type { PlatformRegistry } from "../platforms/registry.js";
+import type { PlatformRegistry } from "../platform-kit/registry.js";
 import type {
   ChatPlatform,
   GamePort,
   InjectMode,
   PlatformInboundMessage,
   PlatformRelayMessage,
-} from "../platforms/types.js";
+} from "../platform-kit/types.js";
 import { PlatformDispatcher, type PlatformStats } from "./dispatcher.js";
 import { MessageStore } from "./store.js";
 import type { KvLike } from "./targets.js";

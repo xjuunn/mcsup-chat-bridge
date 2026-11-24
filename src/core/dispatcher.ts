@@ -23,7 +23,7 @@ import type {
   GamePort,
   PlatformInboundMessage,
   PlatformRelayMessage,
-} from "../platforms/types.js";
+} from "../platform-kit/types.js";
 
 export interface DispatcherOptions {
   /** 每个平台的最大排队数（不含正在投递的那条） */

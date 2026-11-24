@@ -35,10 +35,10 @@ import { PluginError } from "mcsup-plugin";
 import type { LogClient } from "mcsup-plugin";
 import { LearnedTargets } from "../core/targets.js";
 import type { MessageCategory, NormalizedMessage } from "../core/types.js";
-import { formatOutbound, formatRelay, splitText } from "./format.js";
-import { OutboundQueue, TargetBook, type OutboundTarget } from "./shared/outbound.js";
-import { MessageSeen } from "./shared/seen.js";
-import { abortableSleep, errorText, jitter, sleep } from "./shared/runtime.js";
+import { formatOutbound, formatRelay, splitText } from "../platform-kit/format.js";
+import { OutboundQueue, TargetBook, type OutboundTarget } from "../platform-kit/shared/outbound.js";
+import { MessageSeen } from "../platform-kit/shared/seen.js";
+import { abortableSleep, errorText, jitter, sleep } from "../platform-kit/shared/runtime.js";
 import {
   boolOf,
   categoriesOf,
@@ -47,7 +47,7 @@ import {
   stringOf,
   stringsOf,
   targetKey,
-} from "./shared/values.js";
+} from "../platform-kit/shared/values.js";
 import { PLUGIN_VERSION } from "../version.js";
 import type {
   ChatPlatform,
@@ -56,10 +56,10 @@ import type {
   PlatformFactory,
   PlatformInboundMessage,
   PlatformRelayMessage,
-} from "./types.js";
+} from "../platform-kit/types.js";
 
 // 出站格式与分片由 `format.ts` 统一提供；这里再导出一次，保持既有引用稳定。
-export { formatOutbound } from "./format.js";
+export { formatOutbound } from "../platform-kit/format.js";
 
 // ---------------------------------------------------------------------------
 // 配置

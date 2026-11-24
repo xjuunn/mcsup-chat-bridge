@@ -11,8 +11,8 @@ import { expect } from "vitest";
 import type { LogClient } from "mcsup-plugin";
 
 import type { NormalizedMessage } from "../../src/core/types.js";
-import { PlatformRegistry } from "../../src/platforms/registry.js";
-import type { ChatPlatform, PlatformFactory } from "../../src/platforms/types.js";
+import { PlatformRegistry } from "../../src/platform-kit/registry.js";
+import type { ChatPlatform, PlatformFactory } from "../../src/platform-kit/types.js";
 
 /** 适配器 id 的线上形状 */
 export const PLATFORM_ID = /^[a-z][a-z0-9-]{0,31}$/;

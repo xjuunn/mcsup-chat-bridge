@@ -3,9 +3,9 @@ import type { EventMeta, LogClient } from "mcsup-plugin";
 
 import { ChatBridge, type BridgeConfig } from "../src/core/bridge.js";
 import { CATEGORIES, type NormalizedMessage } from "../src/core/types.js";
-import { createRegistry } from "../src/platforms/index.js";
-import type { PlatformRegistry } from "../src/platforms/registry.js";
-import type { ChatPlatform, PlatformFactory } from "../src/platforms/types.js";
+import { createRegistry } from "../src/builtin-platforms.js";
+import type { PlatformRegistry } from "../src/platform-kit/registry.js";
+import type { ChatPlatform, PlatformFactory } from "../src/platform-kit/types.js";
 
 const AT = "2026-11-21T12:00:00.000Z";
 

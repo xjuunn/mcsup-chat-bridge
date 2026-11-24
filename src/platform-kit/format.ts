@@ -2,8 +2,8 @@
  * 出站文本格式（各平台共用）
  *
  * 平台适配器只决定「怎么发」，不决定「长什么样」：玩家聊天统一是
- * `[玩家名]:消息`，其他类别用中文标签，保证 QQ / Telegram 两边看到的内容
- * 一致。分片也放在这里，避免每个适配器各写一份切分逻辑。
+ * `[玩家名]:消息`，其他类别用中文标签，保证各平台看到的内容一致。分片也
+ * 放在这里，避免每个适配器各写一份切分逻辑。
  */
 
 import type { MessageCategory, NormalizedMessage } from "../core/types.js";
@@ -60,8 +60,8 @@ export function splitText(text: string, max: number): string[] {
  * 平台各写一套前缀规则。
  *
  * 媒体不跨平台搬运：QQ 的图片要先转存 `qqbot-media://`、Telegram 用
- * `file_id`，两边不对称。正文里的 `[图片]` 这类占位原样保留，让接收方
- * 至少知道「原来有图」。
+ * `file_id`、Discord 的附件 URL 是临期签名地址，几种句柄互不通用。正文里的
+ * `[图片]` 这类占位原样保留，让接收方至少知道「原来有图」。
  */
 export function formatRelay(message: {
   readonly source: string;

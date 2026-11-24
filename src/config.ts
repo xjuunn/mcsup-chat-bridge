@@ -426,6 +426,139 @@ export const configSchema = s.object({
       { label: "Telegram 机器人（Bot API 长轮询）" },
     ),
   ),
+  discord: s.optional(
+    s.object(
+      {
+        botToken: secretInput(
+          s.string({
+            max: 256,
+            label: "Bot Token",
+            describe:
+              "Discord Developer Portal → 你的应用 → Bot → Reset Token；形如 MTIz...（只会用于 Authorization: Bot，不会写入日志）",
+          }),
+        ),
+        apiBase: s.optional(
+          s.string({
+            max: 512,
+            label: "REST 基址",
+            describe: "默认 https://discord.com/api/v10；使用自建代理时再改",
+          }),
+        ),
+        guilds: s.optional(
+          s.array(s.string({ max: 64, label: "服务器 id" }), {
+            maxItems: 32,
+            label: "服务器白名单",
+            describe:
+              "非空时只接收这些 Discord 服务器（guild）的消息；留空表示不限。服务器 id 可在服务器设置 → 小组件里复制，或从入站日志里取",
+          }),
+        ),
+        groups: s.optional(
+          s.array(s.string({ max: 64, label: "频道 id" }), {
+            maxItems: 32,
+            label: "频道",
+            describe:
+              "出站频道 id；同时作为群聊入站白名单。留空表示全部：入站不限频道，出站发给收到过消息的频道（记录在宿主 KV，重启后仍有效）。频道 id 可右键频道 → 复制链接，末段就是 id",
+          }),
+        ),
+        privateUsers: s.optional(
+          s.array(s.string({ max: 64, label: "用户 id" }), {
+            maxItems: 32,
+            label: "私聊对象",
+            describe:
+              "出站私聊 user id（不是 DM 频道 id）。留空表示全部：出站发给给机器人发过私聊的用户（记录在宿主 KV，重启后仍有效）。发送前会自动经 /users/@me/channels 换成 DM 频道",
+          }),
+        ),
+        allowedUsers: s.optional(
+          s.array(s.string({ max: 64, label: "用户 id" }), {
+            maxItems: 64,
+            label: "入站发言人白名单",
+            describe: "非空时只允许这些 user id 的消息进入游戏；空表示桥接聊天内所有人",
+          }),
+        ),
+        categories: s.optional(
+          s.array(s.enum(CATEGORIES), {
+            label: "转发类别",
+            describe: "Discord 出站只转发这些类别；省略时沿用全局 forwardCategories",
+          }),
+        ),
+        inbound: s.boolean({
+          default: true,
+          label: "接收 Discord 消息",
+          describe: "为 false 时只出站，不把 Discord 消息注入游戏",
+        }),
+        allowPrivate: s.boolean({
+          default: false,
+          label: "接收私聊",
+          describe: "是否把私聊消息注入游戏；默认关闭，避免陌生人打扰",
+        }),
+        syncChannels: s.boolean({
+          default: true,
+          label: "频道/私聊互相同步",
+          describe:
+            "为 true 时，频道里收到的 Discord 消息也会转发到私聊目标，私聊收到的也会转发到频道目标（同一会话不重复发送）；只影响 Discord 内部会话，不影响游戏注入",
+        }),
+        forwardMedia: s.boolean({
+          default: true,
+          label: "同步图片",
+          describe:
+            "为 true 时，频道/私聊互转会把入站图片 URL 作为 embed 再发一次（不下载、不上传）；视频/音频/文件只保留占位文本",
+        }),
+        label: s.string({
+          default: "Discord",
+          max: 16,
+          label: "游戏内标签",
+          describe: "注入游戏时显示的前缀，例如 [Discord] 昵称: 消息",
+        }),
+        server: s.optional(
+          s.string({
+            max: 64,
+            label: "入站服务器",
+            describe: "Discord 消息默认注入的服务器；省略时使用全局 inboundServer 或自动选择",
+          }),
+        ),
+        maxLength: s.integer({
+          default: 1_900,
+          min: 64,
+          max: 2_000,
+          label: "单条出站上限",
+          describe: "超过后按此长度分片发送；Discord 单条文本上限 2000",
+        }),
+        sendIntervalMs: s.integer({
+          default: 1_000,
+          min: 0,
+          max: 10_000,
+          label: "发送间隔",
+          describe: "两次 REST 调用之间的最小间隔，用于温柔限流；Discord 每个频道约 5 条/5 秒",
+        }),
+        apiTimeoutMs: s.integer({
+          default: 15_000,
+          min: 1_000,
+          max: 60_000,
+          label: "API 超时",
+        }),
+        reconnectMinMs: s.integer({
+          default: 1_000,
+          min: 200,
+          max: 60_000,
+          label: "重连最小间隔",
+        }),
+        reconnectMaxMs: s.integer({
+          default: 60_000,
+          min: 1_000,
+          max: 600_000,
+          label: "重连最大间隔",
+        }),
+        reconnectMaxAttempts: s.integer({
+          default: 0,
+          min: 0,
+          max: 10_000,
+          label: "最大重连次数",
+          describe: "0 表示无限重试；401 等凭证问题会直接停止",
+        }),
+      },
+      { label: "Discord 机器人（Bot Gateway）" },
+    ),
+  ),
 });
 
 /** 宿主下发的配置（已按 schema 解析） */

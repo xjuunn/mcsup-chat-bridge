@@ -5,7 +5,7 @@
  * 的默认占位。
  */
 
-import type { ChatPlatform, PlatformFactory } from "./types.js";
+import type { ChatPlatform, PlatformFactory } from "../platform-kit/types.js";
 
 export const nullPlatformFactory: PlatformFactory = {
   id: "null",

@@ -14,6 +14,11 @@
  *
  * `relay` 是可选能力：本地日志 / 空平台不需要接收转发，就不实现它，
  * 内核按「有没有这个方法」决定投不投，不需要按平台 id 特判。
+ *
+ * 新增平台的完整步骤见 `docs/adding-a-platform.md`：解析配置复用
+ * `shared/values.ts`，退避与等待复用 `shared/runtime.ts`，出站目标与队列
+ * 复用 `shared/outbound.ts`（`TargetBook` / `OutboundQueue`），适配器只负责
+ * 协议本身。契约断言是 `test/helpers/platform-contract.ts`。
  */
 
 import type { LogClient } from "mcsup-plugin";

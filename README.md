@@ -95,6 +95,7 @@ src/
     types.ts                ChatPlatform / PlatformFactory / GamePort / 入站消息契约
     registry.ts             注册表（id 校验、实例化）
     format.ts               出站文本格式（`[玩家名]:消息`）与按码点分片
+    shared/                 适配器共用件：取值解析、退避等待、出站目标册与队列
     qq.ts                   QQ 官方机器人 API v2（WebSocket Gateway + OpenAPI，双向）
     telegram.ts             Telegram Bot API（getUpdates 长轮询 + REST，双向、群私聊同步）
     log.ts                  占位平台：写到插件日志
@@ -544,40 +545,67 @@ messages { "server": "survival", "limit": 20 }
 
 ## 扩展一个新的聊天平台
 
-只需要三步，内核与 op 层都不用改。QQ 与 Telegram 已内置，可直接参照
-`src/platforms/qq.ts` / `src/platforms/telegram.ts`；下面用一个假想的 `matrix`
-说明最小骨架。
+只需要「配置 + 一个文件 + 注册一行 + 测试」，内核与 op 层都不用改。QQ 与
+Telegram 已内置，可直接参照 `src/platforms/qq.ts` / `src/platforms/telegram.ts`；
+完整清单（含配置、共享件、测试与自查）见
+[`docs/adding-a-platform.md`](docs/adding-a-platform.md)。
 
 ### 1. 实现 `PlatformFactory`
 
+下面用一个假想的 `matrix` 说明骨架。出站目标解析、队列、积压上限与失败计数
+全部复用 `shared/outbound.ts`，适配器只提供「怎么发」：
+
 ```ts
 // src/platforms/matrix.ts
-import { formatOutbound } from "./format.js";
+import { LearnedTargets } from "../core/targets.js";
+import { formatOutbound, formatRelay } from "./format.js";
+import { OutboundQueue, TargetBook } from "./shared/outbound.js";
 import type { NormalizedMessage } from "../core/types.js";
 import type { ChatPlatform, PlatformFactory } from "./types.js";
+
+const OUTBOUND_LIMIT = 512;
 
 export const matrixPlatformFactory: PlatformFactory = {
   id: "matrix",
   title: "Matrix",
   description: "Matrix 客户端 API",
-  create({ log, settings }) {
-    const config = (settings ?? {}) as { token?: string; roomId?: string };
-    if (config.token === undefined || config.roomId === undefined) {
-      // 抛错会让启动失败，宿主按配置错误处理并回滚
-      throw new Error("matrix.token 与 matrix.roomId 必填");
-    }
+  create({ log, settings, kv, private: privateSync = false }) {
+    const config = parseMatrixSettings(settings); // 缺凭据抛 PluginError("invalid_input")
+    const learned = new LearnedTargets({ key: "matrix:targets", log, kv, limit: 64 });
+    const targets = new TargetBook({
+      label: "matrix", log, learned,
+      groups: config.groups, users: config.privateUsers,
+      syncChannels: config.syncChannels,
+      noTargetHint: "收到消息后自动补齐",
+      noMirrorHint: "在群里发一条消息，或把 matrix.groups 填成群 id",
+    });
+    const outbound = new OutboundQueue<{ id: string; text: string }>({
+      label: "matrix", title: "Matrix", limit: OUTBOUND_LIMIT, log, targets,
+      isStopping: () => stopping,
+      send: (target, pending) => sendText(target, pending.text),
+    });
+    let stopping = false;
     return {
       id: "matrix",
       title: "Matrix",
       start(ctx) {
-        // 建立连接；ctx.game 用于平台 → 游戏，ctx.inbound 交给内核
-        log.info("[matrix] 已启动");
+        if (ctx.signal.aborted) return;
+        ctx.signal.addEventListener("abort", () => {
+          stopping = true;
+          outbound.clear();
+        });
+        // 建立连接；收到外部消息时调用 ctx.inbound({ platform, channel, author, text })
       },
       deliver(message: NormalizedMessage) {
-        // 出站格式由 format.ts 统一，平台之间不会漂移
-        log.debug(`[matrix] ${formatOutbound(message)}`);
+        outbound.push({ id: message.id, text: formatOutbound(message) });
+      },
+      // 可选：实现 relay 就参与跨平台同步；只入自己的队列，禁止回流 ctx.inbound
+      relay(message) {
+        outbound.push({ id: `relay:${message.platform}`, text: formatRelay(message) });
       },
       stop(reason) {
+        stopping = true;
+        outbound.clear();
         log.debug(`[matrix] 断开：${reason}`);
       },
     } satisfies ChatPlatform;
@@ -616,6 +644,20 @@ matrix: s.optional(
 ```
 
 之后配置 `"platforms": ["matrix"]` 就会实例化；`config.matrix` 这个片段会原样传给工厂的 `settings`（schema 内的默认值已由 zod 补齐）。
+
+### 4. 加测试
+
+```ts
+// test/matrix.test.ts
+import { expectPlatformContract } from "./helpers/platform-contract.js";
+
+it("满足平台最小契约", async () => {
+  await expectPlatformContract(matrixPlatformFactory, { settings: { token: "t", roomId: "r" } });
+});
+```
+
+协议收发行为按 QQ / Telegram 的用例写：配置解析、目标（配置与学习）、
+入站白名单、`inbound=false` 只同步不注入、`relay` 不回流。
 
 ### 适配器约定
 

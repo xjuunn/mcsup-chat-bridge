@@ -1,6 +1,6 @@
 {
   "name": "mcsup-chat-bridge",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "private": true,
   "description": "MCSUP 聊天桥插件：Minecraft 聊天与控制台消息分发到可插拔平台，并支持 QQ / Telegram 等平台消息回流游戏",
   "license": "MIT",

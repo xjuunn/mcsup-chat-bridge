@@ -34,9 +34,21 @@ import WebSocket from "ws";
 import { PluginError } from "mcsup-plugin";
 import type { LogClient } from "mcsup-plugin";
 import { LearnedTargets } from "../core/targets.js";
-import { CATEGORIES } from "../core/types.js";
 import type { MessageCategory, NormalizedMessage } from "../core/types.js";
 import { formatOutbound, formatRelay, splitText } from "./format.js";
+import { OutboundQueue, TargetBook, type OutboundTarget } from "./shared/outbound.js";
+import { MessageSeen } from "./shared/seen.js";
+import { abortableSleep, errorText, jitter, sleep } from "./shared/runtime.js";
+import {
+  boolOf,
+  categoriesOf,
+  httpUrlOf,
+  intOf,
+  stringOf,
+  stringsOf,
+  targetKey,
+} from "./shared/values.js";
+import { PLUGIN_VERSION } from "../version.js";
 import type {
   ChatPlatform,
   PlatformContext,
@@ -120,12 +132,10 @@ const INTENT_NAMES = Object.keys(INTENT_BITS) as IntentName[];
 const DEFAULT_API_BASE = "https://api.sgroup.qq.com";
 const SANDBOX_API_BASE = "https://sandbox.api.sgroup.qq.com";
 const DEFAULT_TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken";
-const USER_AGENT = "mcsup-chat-bridge/0.1.15 (QQBotAdapter)";
+const USER_AGENT = `mcsup-chat-bridge/${PLUGIN_VERSION} (QQBotAdapter)`;
 
 /** 出站队列上限：分发层之外再兜一层，避免重连期间无限堆积 */
 const OUTBOUND_LIMIT = 512;
-/** 已处理消息 id 的记忆上限，用于抵御平台重发 */
-const SEEN_LIMIT = 1_000;
 /** 留空配置时自动记住的会话上限（群 / 私聊各自） */
 const LEARNED_LIMIT = 64;
 /** 单次出站失败后的重试次数（首次 + 2 次重试） */
@@ -192,8 +202,8 @@ export function parseQqSettings(raw: unknown): QqSettings {
   }
 
   const sandbox = boolOf(record["sandbox"], false);
-  const apiBase = urlOf(record["apiBase"]) ?? (sandbox ? SANDBOX_API_BASE : DEFAULT_API_BASE);
-  const tokenUrl = urlOf(record["tokenUrl"]) ?? DEFAULT_TOKEN_URL;
+  const apiBase = httpUrlOf(record["apiBase"], "qq") ?? (sandbox ? SANDBOX_API_BASE : DEFAULT_API_BASE);
+  const tokenUrl = httpUrlOf(record["tokenUrl"], "qq") ?? DEFAULT_TOKEN_URL;
   const intents = intentsOf(record["intents"]);
   const categories = categoriesOf(record["categories"]);
   const server = stringOf(record["server"]);
@@ -389,11 +399,6 @@ function markdownImageTag(image: MediaMarkdownImage): string {
 // 适配器
 // ---------------------------------------------------------------------------
 
-interface OutboundTarget {
-  readonly kind: "group" | "private";
-  readonly id: string;
-}
-
 interface PassiveEntry {
   readonly messageId: string;
   readonly firstAt: number;
@@ -414,6 +419,11 @@ interface PendingSend {
   readonly media?: readonly string[];
   /** Markdown 图片最长边上限；贴纸传更小的值，避免表情被放大 */
   readonly mediaMaxPx?: number;
+}
+
+/** 发送前准备的结果：Markdown 图文正文（转存失败时为空，退回富媒体） */
+interface PreparedOutbound {
+  readonly markdown?: string;
 }
 
 /** 平台素材库返回的图片引用（`qqbot-media://image/v1/...`） */
@@ -461,12 +471,7 @@ export class QqPlatform implements ChatPlatform {
   private tokenPromise: Promise<string> | undefined;
 
   private lastSendAt = 0;
-  private sending = false;
-  private warnedNoTarget = false;
-  /** 「私聊镜像发不到群」只告警一次，避免每条私聊都刷屏 */
-  private warnedNoMirror = false;
-  private readonly outQueue: PendingSend[] = [];
-  private readonly seen = new Map<string, number>();
+  private readonly seen = new MessageSeen();
   private readonly passive = new Map<string, PassiveEntry>();
   private readonly seqs = new Map<string, number>();
   /** 被过滤丢弃的会话只告警一次，避免刷屏；键为 `kind:id` */
@@ -479,6 +484,10 @@ export class QqPlatform implements ChatPlatform {
    * 宿主重启后仍在），否则重启后群里没先说话之前，私聊镜像会无目标可发。
    */
   private readonly learned: LearnedTargets;
+  /** 出站目标与两类一次性告警，行为与 Telegram 共用同一套实现 */
+  private readonly targetBook: TargetBook;
+  /** 串行出站队列（含积压上限、单目标失败计数） */
+  private readonly outbound: OutboundQueue<PendingSend, PreparedOutbound>;
   /** 全局 `privateSync`：打开后即使 `qq.allowPrivate=false` 也接收私聊 */
   private readonly privateSync: boolean;
 
@@ -492,6 +501,27 @@ export class QqPlatform implements ChatPlatform {
       log: options.log,
       limit: LEARNED_LIMIT,
       ...(options.kv === undefined ? {} : { kv: options.kv }),
+    });
+    this.targetBook = new TargetBook({
+      label: this.id,
+      log: this.log,
+      learned: this.learned,
+      groups: this.settings.groups,
+      users: this.settings.privateUsers,
+      syncChannels: this.settings.syncChannels,
+      noTargetHint: "等收到第一条群/私聊消息后自动补齐",
+      noMirrorHint: "在群里发一条消息即可自动补齐，或把 qq.groups 填成群 openid",
+    });
+    this.outbound = new OutboundQueue<PendingSend, PreparedOutbound>({
+      label: this.id,
+      title: "QQ",
+      limit: OUTBOUND_LIMIT,
+      log: this.log,
+      targets: this.targetBook,
+      isStopping: () => this.stopping,
+      prepare: async (pending) => this.prepareMedia(pending),
+      send: async (target, pending, prepared) =>
+        this.sendToTarget(target, pending.text, pending.media, prepared.markdown),
     });
   }
 
@@ -519,7 +549,7 @@ export class QqPlatform implements ChatPlatform {
     if (text === "") {
       return;
     }
-    this.enqueue({ id: message.id, text });
+    this.outbound.push({ id: message.id, text });
   }
 
   /**
@@ -544,17 +574,36 @@ export class QqPlatform implements ChatPlatform {
     if (text === "") {
       return;
     }
-    this.enqueue({ id: `relay:${message.platform}:${message.messageId ?? message.at ?? ""}`, text });
+    this.outbound.push({
+      id: `relay:${message.platform}:${message.messageId ?? message.at ?? ""}`,
+      text,
+    });
   }
 
-  /** 入队一条已格式化的出站消息；超限时丢最旧，避免重连期间无限堆积 */
-  private enqueue(pending: PendingSend): void {
-    if (this.outQueue.length >= OUTBOUND_LIMIT) {
-      this.outQueue.shift();
-      this.log.warn(`[qq] 出站积压超过 ${OUTBOUND_LIMIT} 条，丢弃最旧消息`);
+  /**
+   * Markdown 图文发送前的准备：把图片转存到平台素材库，拼成单条正文。
+   *
+   * 先转存再发，任意一张失败就整体退回富媒体，避免一半 Markdown 一半
+   * 富媒体的拼凑。准备失败不抛错：返回空结果，队列照常发文本与富媒体。
+   */
+  private async prepareMedia(pending: PendingSend): Promise<PreparedOutbound> {
+    const media = pending.media ?? [];
+    if (media.length === 0 || this.settings.mediaMode !== "markdown") {
+      return {};
     }
-    this.outQueue.push(pending);
-    void this.flushOutbound();
+    const uploaded: MediaImageRef[] = [];
+    for (const url of media) {
+      try {
+        uploaded.push(await this.uploadMarkdownImage(url, pending.mediaMaxPx));
+      } catch (error) {
+        this.log.warn(`[qq] 图片转存平台素材库失败，退回富媒体：${errorText(error)}`);
+        return {};
+      }
+    }
+    if (uploaded.length !== media.length) {
+      return {};
+    }
+    return { markdown: buildMediaMarkdown(pending.text, uploaded) };
   }
 
   public async stop(reason: string): Promise<void> {
@@ -600,7 +649,7 @@ export class QqPlatform implements ChatPlatform {
       if (closeCode === RATE_LIMIT_CODE) {
         // 4008：发送 payload 过快；官方建议等待后重连
         this.log.warn("[qq] 触发网关限流（4008），60 秒后重连");
-        await this.abortableSleep(60_000);
+        await abortableSleep(60_000, this.ctx?.signal);
         continue;
       }
       if (closeCode !== undefined) {
@@ -641,7 +690,7 @@ export class QqPlatform implements ChatPlatform {
       this.attempts += 1;
       const wait = jitter(this.backoff);
       this.log.info(`[qq] ${Math.round(wait)} ms 后重连（第 ${this.attempts} 次）`);
-      await this.abortableSleep(wait);
+      await abortableSleep(wait, this.ctx?.signal);
       this.backoff = Math.min(
         this.settings.reconnectMaxMs,
         Math.max(this.settings.reconnectMinMs, this.backoff * 2),
@@ -929,7 +978,7 @@ export class QqPlatform implements ChatPlatform {
   private teardown(reason: string): void {
     this.stopHeartbeat();
     this.ready = false;
-    this.outQueue.length = 0;
+    this.outbound.clear();
     const socket = this.socket;
     this.socket = undefined;
     if (socket !== undefined) {
@@ -974,7 +1023,7 @@ export class QqPlatform implements ChatPlatform {
       if (this.seen.has(messageId)) {
         return;
       }
-      this.rememberSeen(messageId);
+      this.seen.remember(messageId);
     }
 
     const author = (typeof event["author"] === "object" && event["author"] !== null
@@ -1109,16 +1158,16 @@ export class QqPlatform implements ChatPlatform {
       return;
     }
     const exclude = targetKey(isGroup ? "group" : "private", channelId);
-    const hasOtherTarget = this.targets().some(
-      (target) => targetKey(target.kind, target.id) !== exclude,
-    );
+    const hasOtherTarget = this.targetBook
+      .targets()
+      .some((target) => targetKey(target.kind, target.id) !== exclude);
     if (!hasOtherTarget) {
-      this.warnNoMirrorTarget(isGroup);
+      this.targetBook.warnNoMirrorTarget(isGroup);
       return;
     }
     const shownText = faceOnly ? text.replace(/\[表情\]\s*/g, "").trim() : text;
     const caption = `[${isGroup ? "群" : "私聊"}] ${displayName}: ${shownText}`;
-    this.enqueue({
+    this.outbound.push({
       id: `mirror:${exclude}`,
       text: caption,
       exclude,
@@ -1135,16 +1184,6 @@ export class QqPlatform implements ChatPlatform {
   /** 记住会话，作为留空配置时的出站目标；超上限丢最早的 */
   private learnChannel(isGroup: boolean, channelId: string): void {
     this.learned.remember(isGroup ? "group" : "private", channelId);
-  }
-
-  private rememberSeen(messageId: string): void {
-    this.seen.set(messageId, Date.now());
-    if (this.seen.size > SEEN_LIMIT) {
-      const oldest = this.seen.keys().next();
-      if (!oldest.done) {
-        this.seen.delete(oldest.value);
-      }
-    }
   }
 
   private async ackInteraction(interactionId: string | undefined): Promise<void> {
@@ -1189,124 +1228,6 @@ export class QqPlatform implements ChatPlatform {
         ? `[qq] 丢弃群消息（${reason}）：group_openid=${channelId}，作者 member_openid=${authorId}`
         : `[qq] 丢弃私聊消息（${reason}）：user_openid=${channelId}，作者=${authorId}`,
     );
-  }
-
-  /**
-   * 「镜像无处可发」时告警一次
-   *
-   * 群/私聊镜像的目标来自「见过的会话」，而群的 `group_openid` 只有在群里说过
-   * 话（或入群事件）之后才知道：`qq.groups` 留空时，群里还没开过口之前，私聊
-   * 消息往群里镜像算出来是零个目标。旧实现直接静默返回——用户只看到「群里不
-   * 同步」，日志里一个字都没有。这里说清缺什么、怎么补。
-   */
-  private warnNoMirrorTarget(isGroup: boolean): void {
-    if (this.warnedNoMirror || !this.settings.syncChannels) {
-      return;
-    }
-    // 缺目标只会发生在「私聊 → 群」：私聊目标随第一条私聊就有，群目标要等群开口
-    if (isGroup) {
-      return;
-    }
-    if (this.settings.groups.length > 0 || this.learned.groups().length > 0) {
-      return;
-    }
-    this.warnedNoMirror = true;
-    this.log.warn(
-      "[qq] 私聊镜像暂时发不到群：还没有记录到任何群会话（在群里发一条消息即可自动补齐，或把 qq.groups 填成群 openid）",
-    );
-  }
-
-  private targets(): readonly OutboundTarget[] {
-    // 留空 = 全部：显式配置优先，否则发给收到过消息的会话（按首次出现顺序）。
-    const groups =
-      this.settings.groups.length > 0 ? this.settings.groups : this.learned.groups();
-    const users =
-      this.settings.privateUsers.length > 0
-        ? this.settings.privateUsers
-        : this.learned.users();
-    const targets: OutboundTarget[] = [];
-    for (const group of groups) {
-      targets.push({ kind: "group", id: group });
-    }
-    for (const user of users) {
-      targets.push({ kind: "private", id: user });
-    }
-    return targets;
-  }
-
-  private async flushOutbound(): Promise<void> {
-    if (this.sending || this.stopping) {
-      return;
-    }
-    this.sending = true;
-    try {
-      while (!this.stopping && this.outQueue.length > 0) {
-        const pending = this.outQueue.shift();
-        if (pending === undefined) {
-          continue;
-        }
-        const text = pending.text;
-        if (text === "") {
-          continue;
-        }
-        const targets = this.targets().filter(
-          (target) => pending.exclude !== targetKey(target.kind, target.id),
-        );
-        if (targets.length === 0) {
-          // 会话列表为空（还没收到过任何消息）才是真的没有目标；
-          // 仅因 `exclude` 过滤掉唯一目标是正常情况，不告警。
-          const hasAny =
-            this.settings.groups.length +
-              this.settings.privateUsers.length +
-              this.learned.size >
-            0;
-          if (!hasAny && !this.warnedNoTarget) {
-            this.warnedNoTarget = true;
-            this.log.warn("[qq] 还没有可用的会话目标（等收到第一条群/私聊消息后自动补齐）");
-          }
-          continue;
-        }
-
-        const media = pending.media ?? [];
-        // 先把图片转存到平台素材库（qqbot-media://），再拼单条 Markdown 图文。
-        // 任何一张失败就整体退回富媒体，避免一半 Markdown 一半富媒体的拼凑。
-        const uploaded: MediaImageRef[] = [];
-        let markdown: string | undefined;
-        if (media.length > 0 && this.settings.mediaMode === "markdown") {
-          let ready = true;
-          for (const url of media) {
-            try {
-              uploaded.push(await this.uploadMarkdownImage(url, pending.mediaMaxPx));
-            } catch (error) {
-              ready = false;
-              this.log.warn(`[qq] 图片转存平台素材库失败，退回富媒体：${errorText(error)}`);
-              break;
-            }
-          }
-          if (ready && uploaded.length === media.length) {
-            markdown = buildMediaMarkdown(text, uploaded);
-          }
-        }
-
-        let failures = 0;
-        for (const target of targets) {
-          try {
-            await this.sendToTarget(target, text, pending.media, markdown);
-          } catch (error) {
-            failures += 1;
-            this.log.warn(`[qq] 发送到 ${target.kind}:${target.id} 失败：${errorText(error)}`);
-          }
-        }
-        if (failures === targets.length) {
-          throw new Error(`QQ 所有目标均发送失败（${pending.id}）`);
-        }
-        if (failures > 0) {
-          this.log.warn(`[qq] 消息 ${pending.id} 有 ${failures}/${targets.length} 个目标失败`);
-        }
-      }
-    } finally {
-      this.sending = false;
-    }
   }
 
   private async sendToTarget(
@@ -1572,7 +1493,7 @@ export class QqPlatform implements ChatPlatform {
       } catch (error) {
         if (!(error instanceof QqApiError)) {
           if (attempt < SEND_ATTEMPTS) {
-            await this.abortableSleep(300 * attempt);
+            await abortableSleep(300 * attempt, this.ctx?.signal);
             continue;
           }
           throw error;
@@ -1595,7 +1516,7 @@ export class QqPlatform implements ChatPlatform {
         if (!retryable || attempt === SEND_ATTEMPTS) {
           throw error;
         }
-        await this.abortableSleep(Math.min(5_000, 400 * attempt));
+        await abortableSleep(Math.min(5_000, 400 * attempt), this.ctx?.signal);
       }
     }
   }
@@ -1607,7 +1528,7 @@ export class QqPlatform implements ChatPlatform {
     }
     const wait = this.settings.sendIntervalMs - (Date.now() - this.lastSendAt);
     if (wait > 0) {
-      await this.abortableSleep(wait);
+      await abortableSleep(wait, this.ctx?.signal);
     }
     this.lastSendAt = Date.now();
   }
@@ -1774,19 +1695,7 @@ export class QqPlatform implements ChatPlatform {
     }
   }
 
-  private abortableSleep(ms: number): Promise<void> {
-    return new Promise<void>((resolve) => {
-      const done = (): void => {
-        clearTimeout(timer);
-        this.ctx?.signal.removeEventListener("abort", done);
-        resolve();
-      };
-      const timer = setTimeout(done, ms);
-      timer.unref?.();
-      this.ctx?.signal.addEventListener("abort", done, { once: true });
-    });
   }
-}
 
 export const qqPlatformFactory: PlatformFactory = {
   id: "qq",
@@ -1800,29 +1709,6 @@ export const qqPlatformFactory: PlatformFactory = {
 // ---------------------------------------------------------------------------
 // 工具
 // ---------------------------------------------------------------------------
-
-function targetKey(kind: "group" | "private", id: string): string {
-  return `${kind}:${id}`;
-}
-
-function stringOf(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
-}
-
-function urlOf(value: unknown): string | undefined {
-  const text = stringOf(value);
-  if (text === undefined) {
-    return undefined;
-  }
-  if (!/^https?:\/\//i.test(text)) {
-    throw new PluginError("invalid_input", `qq 的 URL 必须以 http:// 或 https:// 开头，实际为 ${text}`);
-  }
-  return text.replace(/\/+$/, "");
-}
-
-function boolOf(value: unknown, fallback: boolean): boolean {
-  return typeof value === "boolean" ? value : fallback;
-}
 
 /** 平台素材库限制：单张图片不超过 10MB */
 const MEDIA_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
@@ -1945,50 +1831,3 @@ function imageContentTypeOf(value: string | null, url: string): MarkdownImageTyp
   return "image/jpeg";
 }
 
-function intOf(value: unknown, fallback: number, min: number, max: number): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return fallback;
-  }
-  return Math.min(max, Math.max(min, Math.trunc(value)));
-}
-
-function stringsOf(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const out: string[] = [];
-  for (const item of value) {
-    const text = stringOf(item);
-    if (text !== undefined && !out.includes(text)) {
-      out.push(text);
-    }
-  }
-  return out;
-}
-
-function categoriesOf(value: unknown): MessageCategory[] | undefined {
-  if (!Array.isArray(value) || value.length === 0) {
-    return undefined;
-  }
-  const out: MessageCategory[] = [];
-  for (const item of value) {
-    if (typeof item === "string" && (CATEGORIES as readonly string[]).includes(item)) {
-      out.push(item as MessageCategory);
-    }
-  }
-  return out.length === 0 ? undefined : out;
-}
-
-function jitter(ms: number): number {
-  return ms * (0.8 + Math.random() * 0.4);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}

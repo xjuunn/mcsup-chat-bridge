@@ -20,6 +20,7 @@ import { createQueries } from "./ops/index.js";
 import { createRegistry } from "./platforms/index.js";
 import type { GamePort, InjectMode } from "./platforms/types.js";
 import type { KvLike } from "./core/targets.js";
+import { PLUGIN_VERSION } from "./version.js";
 
 /** 订阅事件：结构化聊天 + 玩家 + 原始控制台 + 服务器生命周期 */
 export const SUBSCRIPTIONS = [
@@ -122,7 +123,7 @@ function createTargetKv(ctx: object, log: LogClient): KvLike | undefined {
 export const plugin = definePlugin({
   id: "chat-bridge",
   title: "聊天桥",
-  version: "0.1.25",
+  version: PLUGIN_VERSION,
   license: "MIT",
   description: "采集 Minecraft 聊天与控制台消息，按可插拔平台分发，并支持平台消息回流游戏",
   resident: true,

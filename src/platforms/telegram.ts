@@ -24,9 +24,24 @@ import { PluginError } from "mcsup-plugin";
 import type { LogClient } from "mcsup-plugin";
 
 import { LearnedTargets } from "../core/targets.js";
-import { CATEGORIES } from "../core/types.js";
 import type { MessageCategory, NormalizedMessage } from "../core/types.js";
 import { formatOutbound, formatRelay } from "./format.js";
+import { OutboundQueue, TargetBook, type OutboundTarget } from "./shared/outbound.js";
+import { MessageSeen } from "./shared/seen.js";
+import { abortableSleep, errorText, jitter, sleep } from "./shared/runtime.js";
+import {
+  boolOf,
+  categoriesOf,
+  httpUrlOf,
+  idOf,
+  intOf,
+  numberOf,
+  objectOf,
+  stringOf,
+  stringsOf,
+  targetKey,
+} from "./shared/values.js";
+import { PLUGIN_VERSION } from "../version.js";
 import type {
   ChatPlatform,
   PlatformContext,
@@ -78,14 +93,12 @@ export interface TelegramSettings {
 }
 
 const DEFAULT_API_BASE = "https://api.telegram.org";
-const USER_AGENT = "mcsup-chat-bridge/0.1.25 (TelegramBotAdapter)";
+const USER_AGENT = `mcsup-chat-bridge/${PLUGIN_VERSION} (TelegramBotAdapter)`;
 
 /** Telegram 单条文本上限 */
 const TEXT_LIMIT = 4_096;
 /** 出站队列上限：分发层之外再兜一层，避免断线期间无限堆积 */
 const OUTBOUND_LIMIT = 512;
-/** 已处理消息 id 的记忆上限，用于抵御平台重发 */
-const SEEN_LIMIT = 1_000;
 /** 留空配置时自动记住的会话上限（群 / 私聊各自） */
 const LEARNED_LIMIT = 64;
 /** 单次出站失败后的重试次数（首次 + 2 次重试） */
@@ -124,7 +137,7 @@ export function parseTelegramSettings(raw: unknown): TelegramSettings {
 
   return {
     botToken,
-    apiBase: urlOf(record["apiBase"]) ?? DEFAULT_API_BASE,
+    apiBase: httpUrlOf(record["apiBase"], "telegram") ?? DEFAULT_API_BASE,
     groups: stringsOf(record["groups"]),
     privateUsers: stringsOf(record["privateUsers"]),
     allowedUsers: stringsOf(record["allowedUsers"]),
@@ -290,11 +303,6 @@ export function splitTelegramHtml(text: string, max: number): string[] {
 // 适配器
 // ---------------------------------------------------------------------------
 
-interface OutboundTarget {
-  readonly kind: "group" | "private";
-  readonly id: string;
-}
-
 interface PendingSend {
   /** 用于日志的标识（游戏消息用消息 id，镜像消息用 `mirror:...`） */
   readonly id: string;
@@ -352,12 +360,7 @@ export class TelegramPlatform implements ChatPlatform {
   private attempts = 0;
 
   private lastSendAt = 0;
-  private sending = false;
-  private warnedNoTarget = false;
-  /** 「私聊镜像发不到群」只告警一次，避免每条私聊都刷屏 */
-  private warnedNoMirror = false;
-  private readonly outQueue: PendingSend[] = [];
-  private readonly seen = new Map<string, number>();
+  private readonly seen = new MessageSeen();
   /** 论坛群的话题 id：群 chat_id → message_thread_id */
   private readonly threads = new Map<string, number>();
   /** 被过滤丢弃的会话只告警一次，避免刷屏；键为 `kind:id` */
@@ -369,6 +372,10 @@ export class TelegramPlatform implements ChatPlatform {
    * 这样默认即全部：不填数字 id 也能把游戏消息发回群里 / 私聊。
    */
   private readonly learned: LearnedTargets;
+  /** 出站目标与两类一次性告警，行为与 QQ 共用同一套实现 */
+  private readonly targetBook: TargetBook;
+  /** 串行出站队列（含积压上限、单目标失败计数） */
+  private readonly outbound: OutboundQueue<PendingSend>;
   /** 全局 `privateSync`：打开后即使 `telegram.allowPrivate=false` 也接收私聊 */
   private readonly privateSync: boolean;
 
@@ -384,6 +391,28 @@ export class TelegramPlatform implements ChatPlatform {
       log: options.log,
       limit: LEARNED_LIMIT,
       ...(options.kv === undefined ? {} : { kv: options.kv }),
+    });
+    this.targetBook = new TargetBook({
+      label: this.id,
+      log: this.log,
+      learned: this.learned,
+      groups: this.settings.groups,
+      users: this.settings.privateUsers,
+      syncChannels: this.settings.syncChannels,
+      noTargetHint:
+        "收到群/私聊消息或机器人入群后会自动补齐；群内普通消息需先在 BotFather 关闭隐私模式",
+      noMirrorHint:
+        "把机器人拉进群即可自动记录，或在群里发一条消息；也可把 telegram.groups 填成群 chat_id",
+    });
+    this.outbound = new OutboundQueue<PendingSend>({
+      label: this.id,
+      title: "Telegram",
+      limit: OUTBOUND_LIMIT,
+      log: this.log,
+      targets: this.targetBook,
+      isStopping: () => this.stopping,
+      send: async (target, pending) =>
+        this.sendToTarget(target, pending.text, pending.media ?? []),
     });
   }
 
@@ -422,7 +451,7 @@ export class TelegramPlatform implements ChatPlatform {
     if (text === "") {
       return;
     }
-    this.enqueue({ id: message.id, text });
+    this.outbound.push({ id: message.id, text });
   }
 
   /**
@@ -442,27 +471,16 @@ export class TelegramPlatform implements ChatPlatform {
     if (text === "") {
       return;
     }
-    this.enqueue({ id: `relay:${message.platform}:${message.messageId ?? message.at ?? ""}`, text });
-  }
-
-  /** 入队一条已格式化的出站消息；超限时丢最旧，避免断线期间无限堆积 */
-  private enqueue(pending: PendingSend): void {
-    if (this.outQueue.length >= OUTBOUND_LIMIT) {
-      this.outQueue.shift();
-      this.log.warn(`[telegram] 出站积压超过 ${OUTBOUND_LIMIT} 条，丢弃最旧消息`);
-    }
-    this.outQueue.push(pending);
-    // 分发层只调用同步的 `deliver`，这里必须自己兜住异步失败，否则会变成
-    // 未处理的 Promise rejection（进程级告警）。
-    void this.flushOutbound().catch((error: unknown) => {
-      this.log.warn(`[telegram] 出站队列异常：${errorText(error)}`);
+    this.outbound.push({
+      id: `relay:${message.platform}:${message.messageId ?? message.at ?? ""}`,
+      text,
     });
   }
 
   public async stop(reason: string): Promise<void> {
     this.stopping = true;
     this.stopController.abort();
-    this.outQueue.length = 0;
+    this.outbound.clear();
     this.log.debug?.(`[telegram] 停止：${reason}`);
     const loop = this.loop;
     if (loop !== undefined) {
@@ -511,7 +529,7 @@ export class TelegramPlatform implements ChatPlatform {
         const wait = this.waitFor(error);
         this.log.warn(`[telegram] 长轮询失败：${errorText(error)}`);
         this.log.info(`[telegram] ${Math.round(wait)} ms 后重试（第 ${this.attempts} 次）`);
-        await this.abortableSleep(wait);
+        await abortableSleep(wait, this.stopController.signal, this.ctx?.signal);
         this.backoff = Math.min(
           this.settings.reconnectMaxMs,
           Math.max(this.settings.reconnectMinMs, this.backoff * 2),
@@ -709,7 +727,7 @@ export class TelegramPlatform implements ChatPlatform {
       if (this.seen.has(messageId)) {
         return;
       }
-      this.rememberSeen(messageId);
+      this.seen.remember(messageId);
     }
 
     const text = telegramInboundText(message);
@@ -814,11 +832,11 @@ export class TelegramPlatform implements ChatPlatform {
       return;
     }
     const exclude = targetKey(isGroup ? "group" : "private", channelId);
-    const hasOtherTarget = this.targets().some(
-      (target) => targetKey(target.kind, target.id) !== exclude,
-    );
+    const hasOtherTarget = this.targetBook
+      .targets()
+      .some((target) => targetKey(target.kind, target.id) !== exclude);
     if (!hasOtherTarget) {
-      this.warnNoMirrorTarget(isGroup);
+      this.targetBook.warnNoMirrorTarget(isGroup);
       return;
     }
     // 真实媒体会跟在文字后面发出，把对应占位去掉，避免同一条消息里重复。
@@ -828,7 +846,7 @@ export class TelegramPlatform implements ChatPlatform {
         : text.replace(/\[(?:图片|视频|动图|文件(?::[^\]]*)?)\]/g, "").trim();
     const head = `[${isGroup ? "群" : "私聊"}] ${displayName}`;
     const caption = shownText === "" ? head : `${head}: ${shownText}`;
-    this.enqueue({
+    this.outbound.push({
       id: `mirror:${exclude}`,
       text: caption,
       exclude,
@@ -839,16 +857,6 @@ export class TelegramPlatform implements ChatPlatform {
   /** 记住会话，作为留空配置时的出站目标；超上限丢最早的 */
   private learnChannel(isGroup: boolean, channelId: string): void {
     this.learned.remember(isGroup ? "group" : "private", channelId);
-  }
-
-  private rememberSeen(messageId: string): void {
-    this.seen.set(messageId, Date.now());
-    if (this.seen.size > SEEN_LIMIT) {
-      const oldest = this.seen.keys().next();
-      if (!oldest.done) {
-        this.seen.delete(oldest.value);
-      }
-    }
   }
 
   /** 私聊是否可接收：平台自己的开关与全局 `privateSync` 取并集 */
@@ -880,103 +888,9 @@ export class TelegramPlatform implements ChatPlatform {
     );
   }
 
-  /**
-   * 「镜像无处可发」时告警一次
-   *
-   * 目标来自「见过的会话」：群 chat_id 只有在群里说过话之后才知道。
-   * `telegram.groups` 留空时，群里还没开过口之前，私聊消息往群里镜像算出来
-   * 是零个目标。这里说清缺什么、怎么补。
-   */
-  private warnNoMirrorTarget(isGroup: boolean): void {
-    if (this.warnedNoMirror || !this.settings.syncChannels) {
-      return;
-    }
-    if (isGroup) {
-      return;
-    }
-    if (this.settings.groups.length > 0 || this.learned.groups().length > 0) {
-      return;
-    }
-    this.warnedNoMirror = true;
-    this.log.warn(
-      "[telegram] 私聊镜像暂时发不到群：还没有记录到任何群会话" +
-        "（把机器人拉进群即可自动记录，或在群里发一条消息；也可把 telegram.groups 填成群 chat_id）",
-    );
-  }
-
-  private targets(): readonly OutboundTarget[] {
-    // 留空 = 全部：显式配置优先，否则发给收到过消息的会话（按首次出现顺序）。
-    const groups =
-      this.settings.groups.length > 0 ? this.settings.groups : this.learned.groups();
-    const users =
-      this.settings.privateUsers.length > 0
-        ? this.settings.privateUsers
-        : this.learned.users();
-    const targets: OutboundTarget[] = [];
-    for (const group of groups) {
-      targets.push({ kind: "group", id: group });
-    }
-    for (const user of users) {
-      targets.push({ kind: "private", id: user });
-    }
-    return targets;
-  }
-
   // -------------------------------------------------------------------------
   // 出站
   // -------------------------------------------------------------------------
-
-  private async flushOutbound(): Promise<void> {
-    if (this.sending || this.stopping) {
-      return;
-    }
-    this.sending = true;
-    try {
-      while (!this.stopping && this.outQueue.length > 0) {
-        const pending = this.outQueue.shift();
-        if (pending === undefined || pending.text === "") {
-          continue;
-        }
-        const targets = this.targets().filter(
-          (target) => pending.exclude !== targetKey(target.kind, target.id),
-        );
-        if (targets.length === 0) {
-          // 会话列表为空（还没收到过任何消息）才是真的没有目标；
-          // 仅因 `exclude` 过滤掉唯一目标是正常情况，不告警。
-          const hasAny =
-            this.settings.groups.length + this.settings.privateUsers.length + this.learned.size > 0;
-          if (!hasAny && !this.warnedNoTarget) {
-            this.warnedNoTarget = true;
-            this.log.warn(
-              "[telegram] 还没有可用的会话目标（收到群/私聊消息或机器人入群后会自动补齐；" +
-                "群内普通消息需先在 BotFather 关闭隐私模式）",
-            );
-          }
-          continue;
-        }
-
-        let failures = 0;
-        for (const target of targets) {
-          try {
-            await this.sendToTarget(target, pending.text, pending.media ?? []);
-          } catch (error) {
-            failures += 1;
-            this.log.warn(
-              `[telegram] 发送到 ${target.kind}:${target.id} 失败：${errorText(error)}`,
-            );
-          }
-        }
-        if (failures === targets.length) {
-          throw new Error(`Telegram 所有目标均发送失败（${pending.id}）`);
-        }
-        if (failures > 0) {
-          this.log.warn(`[telegram] 消息 ${pending.id} 有 ${failures}/${targets.length} 个目标失败`);
-        }
-      }
-    } finally {
-      this.sending = false;
-    }
-  }
 
   /** 先发文字（按长度分片），再逐条发媒体；文本与图片保持「文字在前」 */
   private async sendToTarget(
@@ -1036,7 +950,7 @@ export class TelegramPlatform implements ChatPlatform {
       } catch (error) {
         if (!(error instanceof TelegramApiError)) {
           if (attempt < SEND_ATTEMPTS) {
-            await this.abortableSleep(300 * attempt);
+            await abortableSleep(300 * attempt, this.stopController.signal, this.ctx?.signal);
             continue;
           }
           throw error;
@@ -1064,7 +978,7 @@ export class TelegramPlatform implements ChatPlatform {
           throw error;
         }
         const wait = error.retryAfterMs ?? Math.min(5_000, 500 * attempt);
-        await this.abortableSleep(wait);
+        await abortableSleep(wait, this.stopController.signal, this.ctx?.signal);
       }
     }
   }
@@ -1076,7 +990,7 @@ export class TelegramPlatform implements ChatPlatform {
     }
     const wait = this.settings.sendIntervalMs - (Date.now() - this.lastSendAt);
     if (wait > 0) {
-      await this.abortableSleep(wait);
+      await abortableSleep(wait, this.stopController.signal, this.ctx?.signal);
     }
     this.lastSendAt = Date.now();
   }
@@ -1177,19 +1091,6 @@ export class TelegramPlatform implements ChatPlatform {
     return controller.signal;
   }
 
-  private abortableSleep(ms: number): Promise<void> {
-    return new Promise<void>((resolve) => {
-      const done = (): void => {
-        clearTimeout(timer);
-        this.ctx?.signal.removeEventListener("abort", done);
-        resolve();
-      };
-      const timer = setTimeout(done, ms);
-      timer.unref?.();
-      this.ctx?.signal.addEventListener("abort", done, { once: true });
-    });
-  }
-
   private async loadOffset(): Promise<void> {
     if (this.kv === undefined) {
       return;
@@ -1241,10 +1142,6 @@ export const telegramPlatformFactory: PlatformFactory = {
 // 工具
 // ---------------------------------------------------------------------------
 
-function targetKey(kind: "group" | "private", id: string): string {
-  return `${kind}:${id}`;
-}
-
 /** 配置里的目标可以写数字 id、`@username` 或裸 username */
 function matchesList(list: readonly string[], id: string, username?: string): boolean {
   for (const item of list) {
@@ -1293,106 +1190,3 @@ function previewOf(payload: Record<string, unknown>): string {
   return "[消息]";
 }
 
-function objectOf(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function stringOf(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
-}
-
-function idOf(value: unknown): string | undefined {
-  if (typeof value === "number" && Number.isSafeInteger(value)) {
-    return String(value);
-  }
-  return stringOf(value);
-}
-
-function numberOf(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function urlOf(value: unknown): string | undefined {
-  const text = stringOf(value);
-  if (text === undefined) {
-    return undefined;
-  }
-  if (!/^https?:\/\//i.test(text)) {
-    throw new PluginError(
-      "invalid_input",
-      `telegram 的 URL 必须以 http:// 或 https:// 开头，实际为 ${text}`,
-    );
-  }
-  return text.replace(/\/+$/, "");
-}
-
-function boolOf(value: unknown, fallback: boolean): boolean {
-  return typeof value === "boolean" ? value : fallback;
-}
-
-function intOf(value: unknown, fallback: number, min: number, max: number): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return fallback;
-  }
-  return Math.min(max, Math.max(min, Math.trunc(value)));
-}
-
-function stringsOf(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const out: string[] = [];
-  for (const item of value) {
-    const text = stringOf(item);
-    if (text !== undefined && !out.includes(text)) {
-      out.push(text);
-    }
-  }
-  return out;
-}
-
-function categoriesOf(value: unknown): MessageCategory[] | undefined {
-  if (!Array.isArray(value) || value.length === 0) {
-    return undefined;
-  }
-  const out: MessageCategory[] = [];
-  for (const item of value) {
-    if (
-      typeof item === "string" &&
-      (CATEGORIES as readonly string[]).includes(item) &&
-      !out.includes(item as MessageCategory)
-    ) {
-      out.push(item as MessageCategory);
-    }
-  }
-  return out.length === 0 ? undefined : out;
-}
-
-function jitter(ms: number): number {
-  return ms * (0.8 + Math.random() * 0.4);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-function errorText(error: unknown): string {
-  if (!(error instanceof Error)) {
-    return String(error);
-  }
-  // undici 的网络错误只有一句 `fetch failed`，真正的原因（ENOTFOUND /
-  // ECONNRESET / 证书错误）在 `cause` 里。日志里带上它，才能区分「没网」
-  // 与「token / API 被拒绝」。
-  const cause = (error as { cause?: unknown }).cause;
-  if (cause instanceof Error && cause.message !== error.message) {
-    const code = (cause as NodeJS.ErrnoException).code;
-    return code === undefined
-      ? `${error.message}（${cause.message}）`
-      : `${error.message}（${code}: ${cause.message}）`;
-  }
-  return error.message;
-}

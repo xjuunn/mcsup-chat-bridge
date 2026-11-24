@@ -1,0 +1,187 @@
+# 新增聊天平台适配器
+
+聊天桥的平台是可插拔点：新增平台只动「配置 + 一个新文件 + 注册一行 + 测试」，
+桥内核（`core/`）、op 层（`ops/`）与入口（`src/index.ts`）都不需要改。
+
+本文是实施清单；`README.md` 的「扩展一个新的聊天平台」保留最小骨架，
+两者配套看。
+
+## 1. 三条链路与生命周期
+
+适配器只实现 `ChatPlatform`（`src/platforms/types.ts`）：
+
+| 方法 | 方向 | 谁调用 | 必须做什么 |
+| --- | --- | --- | --- |
+| `start(ctx)` | 建连 | 内核 | 建立连接、恢复持久化状态、订阅 `ctx.signal`；`signal` 已 abort 时直接返回 |
+| `deliver(message)` | 游戏 → 平台 | 内核串行 | 格式化成平台文本并入自己的出站队列 |
+| `relay(message)` | 其它平台 → 本平台 | 内核串行 | 可选；不实现就收不到跨平台转发 |
+| `stop(reason)` | 停止 | 内核 | 幂等；清空队列，结束循环 |
+
+`ctx.inbound(...)` 是入站入口（平台 → 游戏）。适配器只把原生事件翻译成
+`PlatformInboundMessage`，**不要**在适配器里判断权限、服务器、队列或注入方式——
+这些都属于内核。
+
+## 2. 文件清单
+
+```
+src/config.ts                # 配置 schema + 安装向导字段
+src/platforms/<id>.ts        # 适配器（工厂 + parse<Id>Settings）
+src/platforms/index.ts       # BUILTIN_PLATFORMS 注册一行
+test/<id>.test.ts            # 协议收发用例
+test/helpers/platform-contract.ts  # 契约断言（复用）
+scripts/real-host-check.mjs  # 真实宿主装配检查（含 setup 字段）
+README.md                    # 配置表 + 平台小节
+```
+
+## 3. 实现步骤
+
+### 3.1 配置 schema
+
+在 `src/config.ts` 的对象 schema 里加同名片段，默认值写安全值；安装向导
+只问「不填就收不到消息」的字段，群/私聊目标一律允许留空（首条消息后自动学习）。
+
+```ts
+matrix: s.optional(
+  s.object(
+    {
+      token: secretInput(s.string({ label: "Access Token", max: 512 })),
+      apiBase: s.string({ label: "API 基址", max: 512 }),
+      groups: s.array(s.string({ max: 128 }), { label: "出站群" }),
+      privateUsers: s.array(s.string({ max: 128 }), { label: "出站私聊" }),
+      allowPrivate: s.boolean({ label: "接收私聊", default: false }),
+      syncChannels: s.boolean({ label: "群聊/私聊互相同步", default: true }),
+      sendIntervalMs: s.integer({ label: "发送间隔", default: 1_000, min: 0, max: 10_000 }),
+      reconnectMinMs: s.integer({ label: "最小重连间隔", default: 1_000, min: 200, max: 60_000 }),
+      reconnectMaxMs: s.integer({ label: "最大重连间隔", default: 60_000, min: 1_000, max: 600_000 }),
+      reconnectMaxAttempts: s.integer({ label: "最大重连次数", default: 0, min: 0, max: 10_000 }),
+    },
+    { label: "Matrix" },
+  ),
+),
+```
+
+同时把 `platforms` 的 `choices` 与 `setInvalidateOption` 的键补上；插件
+`src/index.ts` 的 `bind.servers` 只需要在适配器有 `server` 覆盖项时才加。
+
+### 3.2 解析配置
+
+`parse<Id>Settings(raw: unknown)` 在工厂阶段一次性把 JSON 转成强类型，
+缺凭据抛 `PluginError("invalid_input", ...)`（宿主据此回滚配置，不会半启动）。
+取值统一用 `src/platforms/shared/values.ts`，不要自己写 `objectOf` 之类的解析：
+
+| 需求 | 函数 |
+| --- | --- |
+| 对象 / 非空字符串 / 数字 id | `objectOf` / `stringOf` / `idOf` |
+| 有限数值 / 整数夹取 / 布尔 | `numberOf` / `intOf` / `boolOf` |
+| 字符串数组 / 消息类别 | `stringsOf` / `categoriesOf` |
+| API 基址（http(s)、去尾斜杠） | `httpUrlOf(value, "<id>")` |
+| 入站消息去重窗口 | `MessageSeen`（`shared/seen.ts`，默认 1000 条、丢最旧） |
+
+### 3.3 出站：直接用共享队列
+
+发到多个会话的行为各平台完全一致，全部收敛在
+`src/platforms/shared/outbound.ts`：目标解析（配置留空 = 学到的会话）、
+排除来源会话、串行发送、积压上限、单目标失败计数、一次性告警。
+
+```ts
+this.targets = new TargetBook({
+  label: this.id,
+  log: this.log,
+  learned: this.learned,          // new LearnedTargets({ key: "<id>:targets", ... })
+  groups: this.settings.groups,
+  users: this.settings.privateUsers,
+  syncChannels: this.settings.syncChannels,
+  noTargetHint: "收到消息后自动补齐",
+  noMirrorHint: "在群里发一条消息，或把 <id>.groups 填成群 id",
+});
+
+this.outbound = new OutboundQueue<Pending, Prepared>({
+  label: this.id,
+  title: "Matrix",                // 错误文案里的显示名
+  limit: OUTBOUND_LIMIT,
+  log: this.log,
+  targets: this.targets,
+  isStopping: () => this.stopping,
+  prepare: async (pending) => this.prepareMedia(pending),  // 可选：发送前一次性准备
+  send: async (target, pending, prepared) => this.sendToTarget(target, pending, prepared),
+});
+```
+
+适配器只提供 `send(target, pending)` 与可选的 `prepare(pending)`。
+`deliver` 与 `relay` 都只做「格式化 + `outbound.push`」，禁止自己维护
+`outQueue` / `sending` / `warnedNoTarget` —— 这些已经统一。
+
+### 3.4 入站
+
+```ts
+this.ctx?.inbound({
+  platform: this.id,
+  channel: { kind, id, name },
+  author: { id, name },
+  text,
+  messageId,
+  // inject: false,   // 平台自己的 inbound 开关关掉时，只参与跨平台同步
+});
+```
+
+会话目标用 `learned.remember(kind, id)` 记住；写盘由 `LearnedTargets` 负责。
+`allowPrivate()` 必须是「平台配置 || 全局 privateSync」，即取并集：
+
+```ts
+private allowPrivate(): boolean {
+  return this.settings.allowPrivate || this.privateSync;
+}
+```
+
+### 3.5 重连与等待
+
+`src/platforms/shared/runtime.ts` 提供 `jitter` / `sleep` / `abortableSleep` /
+`errorText`。退避等待必须用 `abortableSleep(ms, ...signals)`，否则插件停止时
+会多等一个完整退避周期；日志错误用 `errorText`，它会展开 `fetch` 的 `cause`
+（`ECONNRESET` / 证书错误），否则只剩一句 `fetch failed`。
+
+### 3.6 注册
+
+```ts
+// src/platforms/index.ts
+export const BUILTIN_PLATFORMS: readonly PlatformFactory[] = [
+  logPlatformFactory, nullPlatformFactory, qqPlatformFactory, telegramPlatformFactory,
+  matrixPlatformFactory,
+];
+```
+
+`src/platforms/registry.ts` 会校验 id 形状与实例 id 一致性，重复登记直接抛错。
+
+## 4. 硬性约束
+
+- **禁止在适配器里做判定**：白名单、去重、注入模式、服务器选择、类别过滤的
+  全局开关都在内核；适配器只使用自己的平台配置。
+- **`relay` 禁止回流 `ctx.inbound`**，否则形成 qq → telegram → qq 的环。
+- **媒体不跨平台搬运**：`[图片]` 等占位保留即可；平台私有句柄（`file_id`、
+  `qqbot-media://`）在别的平台无效。
+- **单平台故障隔离**：适配器自身的异常必须收口在自己的循环里，不能让
+  `deliver` / `relay` 抛到内核；出站队列已兜住，别绕过它。
+- **不新增运行时依赖**：优先用 Node 标准库；HTTP 用 `fetch`，WebSocket 已经有
+  `ws`。引入新依赖需要单独说明理由。
+- **日志**：中文、`[<id>]` 前缀、不打印 token / 完整 URL。
+- **配置留空 = 全部**：不要要求用户手抄会话 id。
+
+## 5. 测试清单
+
+1. `test/<id>.test.ts`
+   - 配置解析：默认值、缺凭据抛 `invalid_input`、越界夹取。
+   - 出站：格式化、目标（配置 / 学习）、媒体或分片、失败重试。
+   - 入站：群 / 私聊、白名单、`inbound=false` 只同步不注入、去重。
+   - `relay`：只发到本平台会话，不回流入站。
+2. `test/platform-contract.test.ts`：给内置平台跑契约；新平台加一行
+   `await expectPlatformContract(matrixPlatformFactory, { settings })`。
+3. `scripts/real-host-check.mjs`：装配层校验（能力、setup 字段、schema 默认值）。
+4. `npm run verify`：类型检查 + 单测 + 构建 + 真实宿主检查，四项全过才算完成。
+
+## 6. 上线前自查
+
+- [ ] 配置留空时能靠首条消息补齐目标，重启后仍记得（`storage:kv` 未授予时降级有日志）。
+- [ ] `stop` 幂等，`ctx.signal` abort 后不再发新消息。
+- [ ] 断线重连退避可被停止打断，日志能看出「连不上」与「凭据错」的区别。
+- [ ] 群 / 私聊两个方向都实测过入站、出站与跨平台转发。
+- [ ] RAM 使用有界：队列上限、入站去重窗口、缓存条数都有常量控制。

@@ -287,6 +287,7 @@ function startPlatform(
   settings: Record<string, unknown> = {},
   inbound: PlatformInboundMessage[] = [],
   kv?: KvLike,
+  extra: { readonly private?: boolean } = {},
 ): RunningPlatform {
   // 用假服务器持有的同一个 log 实例，测试才能断言适配器写了什么。
   const log = fake.log;
@@ -300,6 +301,7 @@ function startPlatform(
       apiTimeoutMs: 2_000,
       ...settings,
     },
+    ...(extra.private === undefined ? {} : { private: extra.private }),
     ...(kv === undefined ? {} : { kv }),
   });
   const abort = new AbortController();
@@ -527,6 +529,20 @@ describe("Telegram 适配器（假 Bot API）", () => {
     await waitFor(() => fake.offsets.includes(4), "offset 前进");
     expect(inbound).toEqual([]);
     expect(logText(fake.log)).toContain("allowPrivate");
+  });
+
+  it("全局 privateSync 打开时，即使 allowPrivate=false 也接收私聊", async () => {
+    const fake = await startFakeTelegram();
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    startPlatform(fake, {}, inbound, undefined, { private: true });
+
+    fake.push(privateUpdate(3, "全局开关"));
+    await waitFor(() => inbound.length === 1, "全局开关下的私聊入站");
+    expect(inbound[0]).toMatchObject({
+      channel: { kind: "private", id: "42" },
+      text: "全局开关",
+    });
   });
 
   it("群白名单生效", async () => {

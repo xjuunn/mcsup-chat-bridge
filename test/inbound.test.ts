@@ -27,6 +27,7 @@ function config(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
     queueCapacity: 4,
     inbound: true,
     crossPlatform: true,
+    privateSync: false,
     inboundMaxLength: 40,
     injectMode: "tellraw",
     platformSettings: {},

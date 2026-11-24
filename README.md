@@ -9,6 +9,7 @@ QQ 与 Telegram 适配器支持**双向互通**：
 - 游戏 → 平台：玩家聊天按 `[玩家名]:消息` 发送到群/私聊；
 - 平台 → 游戏：群聊消息（可选私聊）经 `console:write` 注入游戏，显示为 `[QQ] 昵称: 消息` / `[Telegram] 昵称: 消息`；注入方式由 `injectMode` 决定（默认 `say` 会写进服务器日志，`tellraw` 只显示在游戏内）。
 - 两者都支持群聊与私聊**互相同步**（`qq.syncChannels` / `telegram.syncChannels`）；Telegram 复用 `file_id` 直接转发图片/视频/文件。
+- **私聊同步**：顶层 `privateSync`（默认 `false`）一次决定所有已选平台是否接收私聊，安装向导里问一次；开启后私聊会参与注入游戏、群/私聊镜像与跨平台同步。与各平台的 `allowPrivate` 取并集，关掉它不会覆盖平台里显式打开的配置。
 - **跨平台同步**：QQ 与 Telegram 默认互相转发（`crossPlatform=true`），群里或私聊收到的消息会发到另一个平台的所有会话；转发形如 `[QQ 群] 昵称: 消息`，来源平台不回发自己。图片等媒体不跨平台搬运，只保留 `[图片]` 占位。
 
 ## 快速开始
@@ -54,7 +55,9 @@ mcsup plugin install --from .\build
 2. 按插件 `setup` 声明逐项询问配置（每个问题只有一行，不带提示文本）：
    - `启用的平台` 是多选框：`■`/`□` 表示是否选中，空格切换、回车确认；
    - `游戏内注入方式` 是单选项；`入站服务器` 从已注册服务器中单选（必填），
-     还没有服务器时才退回手输；
+     还没有服务器时才退回手输；`同步私聊消息` 是**全局开关**（默认「否」），
+     选「是」后所有已选平台的私聊都参与注入、镜像与跨平台同步，不再按平台
+     分别问；
    - `QQ AppID` / `QQ ClientSecret` / `Telegram Bot Token` 三项**按平台条件提问**：
      平台里选了 `qq` 才会问前两项，选了 `telegram` 才会问 Bot Token，没选的平台
      一个都不问（`setup.fields[].when`，需要支持 descriptor schema 4 的宿主）；
@@ -161,6 +164,7 @@ test/                       分类、存储、分发、桥、入站、QQ、Teleg
 | `queueCapacity` | `256` | 单平台出站与全局入站队列的积压上限（8–4096），超出丢最旧 |
 | `inbound` | `true` | 是否允许平台消息注入游戏；关闭后 QQ / Telegram 仍可出站 |
 | `crossPlatform` | `true` | 是否让平台之间互相同步：一个平台收到的消息转给其它所有启用了同步的平台（如 QQ ↔ Telegram）。与 `inbound` 独立：关掉入站只影响「平台 → 游戏」，平台之间仍互通；关掉它则各平台只与游戏双向。只有实现 `relay` 的适配器会接收转发，`log` / `null` 不接收 |
+| `privateSync` | `false` | 是否接收私聊：一次对所有已选平台生效，开启后私聊参与注入游戏、群/私聊镜像与跨平台同步。与各平台的 `allowPrivate` 取并集（平台里显式打开的不受它影响）；只影响声明了私聊能力的适配器 |
 | `inboundServer` | 自动 | 入站默认服务器；省略时选运行中的服务器 |
 | `inboundMaxLength` | `200` | 单条入站文本上限（32–512），超长截断 |
 | `injectMode` | `"say"` | 平台消息注入游戏的方式：`say` 会写入 `logs/latest.log`，但游戏内多出 `[Server]` 前缀；`tellraw` 游戏里只有 `[QQ]` / `[Telegram]` 标签但不写服务器日志（原版只有 `say`/`me` 这类服务器广播会进日志） |
@@ -178,7 +182,7 @@ test/                       分类、存储、分发、桥、入站、QQ、Teleg
 | `qq.allowedUsers` | `[]` | 非空时只允许这些 openid 进入游戏 |
 | `qq.categories` | 沿用全局 | QQ 出站类别过滤 |
 | `qq.inbound` | `true` | 是否把 QQ 消息注入游戏；为 `false` 时仍参与群/私聊镜像与跨平台同步 |
-| `qq.allowPrivate` | `false` | 是否接收私聊（默认关闭，避免陌生人打扰） |
+| `qq.allowPrivate` | `false` | 是否接收私聊（默认关闭，避免陌生人打扰）；顶层 `privateSync=true` 时同样生效（两者取并集） |
 | `qq.syncChannels` | `true` | 群聊与私聊互相同步：群里收到的消息也会发到私聊目标，私聊收到的也会发到群目标；只影响 QQ 内部会话，不影响游戏注入；来源会话不重复发送 |
 | `qq.forwardMedia` | `true` | 群/私聊互转时用一条消息转发图片（文字在前、图片在后）。QQ 表情统一转为 `[表情]` |
 | `qq.mediaMode` | `"markdown"` | `markdown`：单条 Markdown 图文，图片先转存平台素材库换成 `qqbot-media://` 引用并带 `#宽px #高px`（QQ 客户端不带宽高只显示 `[图片]`），普通图片最长边 480px、纯表情贴纸 160px；`rich`：单条富媒体（图片在上、文字在下）。Markdown 上传或发送失败会自动退回 `rich` |
@@ -199,7 +203,7 @@ test/                       分类、存储、分发、桥、入站、QQ、Teleg
 | `telegram.allowedUsers` | `[]` | 非空时只允许这些 `user id` / `@username` 的消息进入游戏 |
 | `telegram.categories` | 沿用全局 | Telegram 出站类别过滤 |
 | `telegram.inbound` | `true` | 是否把 Telegram 消息注入游戏；为 `false` 时仍参与群/私聊镜像与跨平台同步 |
-| `telegram.allowPrivate` | `false` | 是否接收私聊（默认关闭，避免陌生人打扰） |
+| `telegram.allowPrivate` | `false` | 是否接收私聊（默认关闭，避免陌生人打扰）；顶层 `privateSync=true` 时同样生效（两者取并集） |
 | `telegram.syncChannels` | `true` | 群聊与私聊互相同步：群里收到的消息也会发到私聊目标，私聊收到的也会发到群目标；来源会话不重复发送 |
 | `telegram.forwardMedia` | `true` | 群/私聊互转时转发图片/视频/动图/文件，复用 Telegram 的 `file_id`（不下载、不上传），文字在前、媒体在后 |
 | `telegram.label` | `"Telegram"` | 游戏内显示为 `[Telegram] 昵称: 消息` |
@@ -221,6 +225,7 @@ test/                       分类、存储、分发、桥、入站、QQ、Teleg
   "forwardCategories": ["chat", "command", "join", "leave", "death", "advancement"],
   "inbound": true,
   "inboundServer": "survival",
+  "privateSync": false,
   "qq": {
     "appId": "102000001",
     "clientSecret": "your-client-secret",
@@ -244,6 +249,7 @@ Telegram 示例（两个平台可同时启用）：
   "forwardCategories": ["chat"],
   "inbound": true,
   "inboundServer": "survival",
+  "privateSync": true,
   "qq": {
     "appId": "102000001",
     "clientSecret": "your-client-secret"
@@ -521,7 +527,7 @@ messages { "server": "survival", "limit": 20 }
 | 游戏里说话，Telegram 收不到 | `还没有可用的会话目标` | 出站目标还没学到。把机器人拉进群（入群事件会自动记录），或在群里发一条消息；也可以显式填 `telegram.groups` |
 | 群里发消息，游戏里没反应 | 没有 `收到群消息：chat_id=...` | BotFather 的**隐私模式**还开着（`/setprivacy` → `Disable`），然后必须把机器人移出群再拉回；只改开关不重拉不生效。若日志里出现「丢弃群消息」，按括号里的原因处理 |
 | 群里发消息，日志有 `收到群消息` 但游戏没反应 | `注入 <server>` / `未注入` | 目标服务器没在运行、`inbound=false`，或 `inboundServer` 选了别的服务器；看注入日志里的服务器名 |
-| 私聊没反应 | `丢弃私聊（私聊未启用…）` | 默认不接私聊；需要时 `mcsup plugin config set chat-bridge telegram.allowPrivate true`（注意陌生人也能私聊机器人） |
+| 私聊没反应 | `丢弃私聊（私聊未启用…）` | 默认不接私聊。全局打开：`mcsup plugin config set chat-bridge privateSync true`，或在安装向导里选「同步私聊消息 = 是」；只开单个平台时用 `telegram.allowPrivate` / `qq.allowPrivate`（注意陌生人也能私聊机器人） |
 | 偶发 `fetch failed` | 后面跟着 `N ms 后重试` | 到 `api.telegram.org` 的网络抖动（代理 / TUN 切换时常见）；新版本会把 `cause`（`ECONNRESET` / `ENOTFOUND` 等）一起打出来。持续失败再检查代理 |
 
 定位顺序固定为：**有没有收到更新** → **有没有目标** → **有没有注入**。
@@ -628,6 +634,9 @@ matrix: s.optional(
   搬运。
 - **降级**：`ctx.game` 在未授予 `console:write` 时为 `undefined`；适配器只负责上报消息，
   内核会记录失败计数，不要求适配器自己判断权限。
+- **私聊**：`PlatformCreateOptions.private` 是内核下发的全局 `privateSync`，适配器
+  用「自己的 `allowPrivate` 或它」决定是否接收私聊（取并集，不要覆盖平台显式配置）。
+  打开后私聊和群聊走同一条入站链路，无需额外分支。
 - 平台 id 必须匹配 `^[a-z][a-z0-9-]{0,31}$`，且与 `create()` 返回实例的 `id` 一致。
 
 ## 运行保证与边界

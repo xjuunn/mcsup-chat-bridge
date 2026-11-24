@@ -479,10 +479,13 @@ export class QqPlatform implements ChatPlatform {
    * 宿主重启后仍在），否则重启后群里没先说话之前，私聊镜像会无目标可发。
    */
   private readonly learned: LearnedTargets;
+  /** 全局 `privateSync`：打开后即使 `qq.allowPrivate=false` 也接收私聊 */
+  private readonly privateSync: boolean;
 
   public constructor(options: PlatformCreateOptions) {
     this.log = options.log;
     this.settings = parseQqSettings(options.settings);
+    this.privateSync = options.private === true;
     this.backoff = this.settings.reconnectMinMs;
     this.learned = new LearnedTargets({
       key: "qq:targets",
@@ -1012,12 +1015,13 @@ export class QqPlatform implements ChatPlatform {
         return;
       }
     } else {
-      if (!this.settings.allowPrivate) {
+      if (!this.allowPrivate()) {
         this.warnDropped(
           isGroup,
           channelId,
           authorId,
-          "私聊未启用（qq.allowPrivate=false）；如需接收私聊，把 qq.allowPrivate 设为 true",
+          "私聊未启用（qq.allowPrivate=false）；如需接收私聊，把 qq.allowPrivate 设为 true，" +
+            "或在安装向导里打开「同步私聊消息」",
         );
         return;
       }
@@ -1157,6 +1161,11 @@ export class QqPlatform implements ChatPlatform {
   // -------------------------------------------------------------------------
   // 出站
   // -------------------------------------------------------------------------
+
+  /** 私聊是否可接收：平台自己的开关与全局 `privateSync` 取并集 */
+  private allowPrivate(): boolean {
+    return this.settings.allowPrivate || this.privateSync;
+  }
 
   /**
    * 入站被过滤时告警一次（每个会话独立），并带上 OpenID。

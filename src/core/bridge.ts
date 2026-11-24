@@ -49,6 +49,14 @@ export interface BridgeConfig {
    * 平台之间仍然互通；关掉它则只有游戏与各平台之间双向，平台之间不串。
    */
   readonly crossPlatform: boolean;
+  /**
+   * 是否接收私聊（默认 false）。
+   *
+   * 与 `crossPlatform` 独立：打开后所有适配器都接受私聊，私聊会参与注入
+   * 游戏、群/私聊镜像与跨平台同步。适配器自己的 `allowPrivate` 仍然有效，
+   * 两者取并集，避免全局开关把平台的显式配置覆盖掉。
+   */
+  readonly privateSync: boolean;
   /** 入站默认服务器；省略时由 GamePort 自动选择 */
   readonly inboundServer?: string;
   /** 单条入站文本上限 */
@@ -410,6 +418,7 @@ export class ChatBridge {
       this.registry.create(id, {
         log: this.log,
         settings: config.platformSettings[id],
+        ...(config.privateSync ? { private: true } : {}),
         ...(this.kv === undefined ? {} : { kv: this.kv }),
       }),
     );
@@ -576,6 +585,10 @@ export class ChatBridge {
 /** 平台集合、平台配置、队列容量都没变时，只需要更新过滤与缓存设置 */
 function dispatcherUnchanged(a: BridgeConfig, b: BridgeConfig): boolean {
   if (a.queueCapacity !== b.queueCapacity) {
+    return false;
+  }
+  // 私聊开关作为创建选项下发给适配器，变化时必须重建
+  if (a.privateSync !== b.privateSync) {
     return false;
   }
   if (a.platforms.length !== b.platforms.length) {

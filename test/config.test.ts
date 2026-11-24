@@ -81,11 +81,13 @@ describe("配置解析", () => {
     const defaults = resolveConfig(parse({}));
     expect(defaults.inbound).toBe(true);
     expect(defaults.crossPlatform).toBe(true);
+    expect(defaults.privateSync).toBe(false);
     expect(defaults.inboundMaxLength).toBe(200);
     expect(defaults.injectMode).toBe("say");
-    const custom = resolveConfig(parse({ inbound: false, crossPlatform: false, inboundServer: "creative", inboundMaxLength: 64, injectMode: "say" }));
+    const custom = resolveConfig(parse({ inbound: false, crossPlatform: false, privateSync: true, inboundServer: "creative", inboundMaxLength: 64, injectMode: "say" }));
     expect(custom.inbound).toBe(false);
     expect(custom.crossPlatform).toBe(false);
+    expect(custom.privateSync).toBe(true);
     expect(custom.inboundServer).toBe("creative");
     expect(custom.inboundMaxLength).toBe(64);
     expect(custom.injectMode).toBe("say");

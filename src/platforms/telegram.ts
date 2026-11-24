@@ -78,7 +78,7 @@ export interface TelegramSettings {
 }
 
 const DEFAULT_API_BASE = "https://api.telegram.org";
-const USER_AGENT = "mcsup-chat-bridge/0.1.24 (TelegramBotAdapter)";
+const USER_AGENT = "mcsup-chat-bridge/0.1.25 (TelegramBotAdapter)";
 
 /** Telegram 单条文本上限 */
 const TEXT_LIMIT = 4_096;
@@ -369,11 +369,14 @@ export class TelegramPlatform implements ChatPlatform {
    * 这样默认即全部：不填数字 id 也能把游戏消息发回群里 / 私聊。
    */
   private readonly learned: LearnedTargets;
+  /** 全局 `privateSync`：打开后即使 `telegram.allowPrivate=false` 也接收私聊 */
+  private readonly privateSync: boolean;
 
   public constructor(options: PlatformCreateOptions) {
     this.log = options.log;
     this.kv = options.kv;
     this.settings = parseTelegramSettings(options.settings);
+    this.privateSync = options.private === true;
     this.backoff = this.settings.reconnectMinMs;
     this.learned = new LearnedTargets({
       key: "telegram:targets",
@@ -731,12 +734,13 @@ export class TelegramPlatform implements ChatPlatform {
         return;
       }
     } else {
-      if (!this.settings.allowPrivate) {
+      if (!this.allowPrivate()) {
         this.warnDropped(
           isGroup,
           chatId,
           senderId,
-          "私聊未启用（telegram.allowPrivate=false）；如需接收私聊，把 telegram.allowPrivate 设为 true",
+          "私聊未启用（telegram.allowPrivate=false）；如需接收私聊，把 telegram.allowPrivate 设为 true，" +
+            "或在安装向导里打开「同步私聊消息」",
         );
         return;
       }
@@ -845,6 +849,11 @@ export class TelegramPlatform implements ChatPlatform {
         this.seen.delete(oldest.value);
       }
     }
+  }
+
+  /** 私聊是否可接收：平台自己的开关与全局 `privateSync` 取并集 */
+  private allowPrivate(): boolean {
+    return this.settings.allowPrivate || this.privateSync;
   }
 
   /**

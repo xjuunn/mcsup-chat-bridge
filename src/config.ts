@@ -58,6 +58,13 @@ export const configSchema = s.object({
       "为 true（默认）时，一个平台收到的消息会转给其它所有启用的平台，QQ 与 Telegram 因此互通；" +
       "为 false 时各平台只与游戏互通，平台之间不串。与「允许平台消息进入游戏」互相独立",
   }),
+  privateSync: s.boolean({
+    default: false,
+    label: "同步私聊消息",
+    describe:
+      "为 true 时所有启用的平台都接收私聊消息：注入游戏、群/私聊镜像与跨平台同步都会带上私聊；" +
+      "默认关闭，避免陌生人私聊机器人。只影响声明了私聊能力的平台（QQ / Telegram）",
+  }),
   inboundServer: s.optional(
     s.string({
       max: 64,
@@ -445,6 +452,7 @@ export function resolveConfig(raw: RawConfig): BridgeConfig {
     queueCapacity: raw.queueCapacity ?? 256,
     inbound: raw.inbound ?? true,
     crossPlatform: raw.crossPlatform ?? true,
+    privateSync: raw.privateSync ?? false,
     inboundMaxLength: raw.inboundMaxLength ?? 200,
     injectMode: raw.injectMode ?? "say",
     ...(raw.inboundServer === undefined ? {} : { inboundServer: raw.inboundServer }),

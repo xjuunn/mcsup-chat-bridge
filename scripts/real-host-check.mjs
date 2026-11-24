@@ -82,6 +82,27 @@ for (const [path, platform] of [
     `setup.${path} 的标签不该带括号提示，实际「${field.label}」`,
   );
 }
+// 私聊同步是全局开关：只问一次，所以不能挂 `when`（否则又变成按平台提问），
+// 必须是布尔且默认关闭——陌生人不该在装完之后就能直接私聊机器人。
+const privateSync = setupFields[fieldIndex.get("privateSync")];
+assert(privateSync !== undefined, "setup 缺少 privateSync 字段");
+assert(
+  privateSync.when === undefined,
+  `setup.privateSync 不该有 when（全局只问一次），实际 ${JSON.stringify(privateSync.when)}`,
+);
+assert(
+  (fieldIndex.get("privateSync") ?? -1) > platformsIndex,
+  "setup.privateSync 必须排在 platforms 之后",
+);
+assert(
+  privateSync.default === false,
+  `setup.privateSync 默认值应为 false，实际 ${JSON.stringify(privateSync.default)}`,
+);
+const privateSyncSchema = descriptor.schemas?.config?.properties?.privateSync;
+assert(
+  privateSyncSchema?.type === "boolean",
+  `配置缺少顶层 privateSync 布尔字段，实际 ${JSON.stringify(privateSyncSchema)}`,
+);
 assert(
   Array.isArray(manifest.subscriptions) && manifest.subscriptions.includes("chat:message"),
   "manifest 未声明 chat:message 订阅",

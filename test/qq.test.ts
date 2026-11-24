@@ -320,6 +320,7 @@ function startPlatform(
   settings: Record<string, unknown>,
   inbound: PlatformInboundMessage[] = [],
   kv?: KvLike,
+  extra: { readonly private?: boolean } = {},
 ): RunningPlatform {
   const platform = new QqPlatform({
     log: fakeLog(),
@@ -331,6 +332,7 @@ function startPlatform(
       sendIntervalMs: 0,
       ...settings,
     },
+    ...(extra.private === undefined ? {} : { private: extra.private }),
     ...(kv === undefined ? {} : { kv }),
   });
   const abort = new AbortController();
@@ -628,6 +630,42 @@ describe("QQ 适配器（假官方 Gateway + REST）", () => {
       author: { id: "u9", name: "Bob" },
       text: "悄悄话",
     });
+  });
+
+  it("全局 privateSync 打开时，即使 allowPrivate=false 也接收私聊", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    startPlatform(fake, {}, inbound, undefined, { private: true });
+    await fake.ready();
+
+    fake.dispatch("C2C_MESSAGE_CREATE", {
+      id: "c2c-private-sync",
+      content: "全局开关",
+      author: { user_openid: "u9", username: "Bob" },
+    });
+
+    await waitFor(() => inbound.length === 1, "全局开关下的私聊入站");
+    expect(inbound[0]).toMatchObject({
+      channel: { kind: "private", id: "u9" },
+      text: "全局开关",
+    });
+  });
+
+  it("全局 privateSync 关闭且 allowPrivate=false 时仍拒绝私聊", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    startPlatform(fake, {}, inbound, undefined, { private: false });
+    await fake.ready();
+
+    fake.dispatch("C2C_MESSAGE_CREATE", {
+      id: "c2c-private-off",
+      content: "不该出现",
+      author: { user_openid: "u9", username: "Bob" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(inbound).toHaveLength(0);
   });
 
   it("群消息镜像到私聊，且不回发来源群", async () => {

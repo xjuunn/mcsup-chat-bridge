@@ -33,6 +33,14 @@ export interface PlatformCreateOptions {
    * 进程内记忆，不阻塞启动。
    */
   readonly kv?: KvLike;
+  /**
+   * 是否接收私聊（全局 `privateSync`，默认 false）。
+   *
+   * 内核下发给每个适配器，打开后等于对每个平台都设 `allowPrivate=true`：
+   * 安装向导问一次就能同时打开 QQ 与 Telegram 的私聊。适配器自己的
+   * `allowPrivate` 仍然有效，两者取并集。
+   */
+  readonly private?: boolean;
 }
 
 /** 入站消息的通道：群聊或私聊 */

@@ -25,6 +25,7 @@ const BASE: BridgeConfig = {
   queueCapacity: 8,
   inbound: true,
   crossPlatform: true,
+  privateSync: false,
   inboundMaxLength: 200,
   injectMode: "tellraw",
   platformSettings: {},
@@ -343,6 +344,12 @@ describe("ChatBridge", () => {
     expect(a).toHaveLength(2);
     expect(a[1]?.started).toBe(1);
     expect(a[0]?.stopped).toBe(1);
+
+    // privateSync 是创建选项，变化时必须重建，否则适配器仍按旧值拒收私聊
+    await bridge.applyConfig({ ...BASE, platforms: ["a"], queueCapacity: 7, privateSync: true });
+    expect(a).toHaveLength(3);
+    expect(a[2]?.started).toBe(1);
+    expect(a[1]?.stopped).toBe(1);
 
     await bridge.stop("test");
   });

@@ -122,7 +122,7 @@ function createTargetKv(ctx: object, log: LogClient): KvLike | undefined {
 export const plugin = definePlugin({
   id: "chat-bridge",
   title: "聊天桥",
-  version: "0.1.24",
+  version: "0.1.25",
   license: "MIT",
   description: "采集 Minecraft 聊天与控制台消息，按可插拔平台分发，并支持平台消息回流游戏",
   resident: true,
@@ -155,6 +155,14 @@ export const plugin = definePlugin({
         label: "游戏内注入方式",
         description:
           "say（默认）：写入 logs/latest.log，游戏内会多出 [Server] 前缀；tellraw：只显示在游戏内、不写日志，游戏里只有 [QQ]/[Telegram] 标签",
+      },
+      {
+        path: "privateSync",
+        required: true,
+        default: false,
+        label: "同步私聊消息",
+        description:
+          "全局开关：选「是」后所有已选平台的私聊都参与注入游戏、群/私聊镜像与跨平台同步；默认关闭，避免陌生人私聊机器人",
       },
       {
         path: "inboundServer",

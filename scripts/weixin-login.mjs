@@ -415,9 +415,10 @@ function printQr(qr) {
  * 安装向导回传内容
  *
  * 新宿主经 `MCSUP_SETUP_FIELDS` 声明允许回填的路径：登录一次可以同时写
- * `weixin.botToken` 与服务端建议的 `weixin.apiBase`，避免向导再问一遍基址。
- * 旧宿主不设置该变量，只写单个 token 字符串。基线地址等于默认值时省略，
- * 让配置保持干净。
+ * `weixin.botToken` 与 `weixin.apiBase`，避免向导再问一遍基址。服务端没给
+ * `baseurl` 时写入默认地址：适配器本来就用这个默认值，显式写入不会改变行为，
+ * 但能让向导认为该字段已填，不再打扰用户。旧宿主不设置该变量，只写单个
+ * token 字符串。
  */
 function buildSetupPayload(token, suggestedBaseUrl) {
   const allowed = options.setupFields;
@@ -425,11 +426,12 @@ function buildSetupPayload(token, suggestedBaseUrl) {
     return token;
   }
   const values = { "weixin.botToken": token };
-  const base =
-    typeof suggestedBaseUrl === "string" ? suggestedBaseUrl.trim().replace(/\/+$/, "") : "";
-  const fallback = DEFAULT_API_BASE.replace(/\/+$/, "");
-  if (base !== "" && base !== fallback && allowed.includes("weixin.apiBase")) {
-    values["weixin.apiBase"] = base;
+  if (allowed.includes("weixin.apiBase")) {
+    const base =
+      typeof suggestedBaseUrl === "string" ? suggestedBaseUrl.trim().replace(/\/+$/, "") : "";
+    // 服务端没给 baseurl 时写本次实际使用的地址：默认就是官方地址，显式指定
+    // `--api-base` 时也把它保留下来，下次启动不再猜。
+    values["weixin.apiBase"] = base === "" ? options.apiBase.replace(/\/+$/, "") : base;
   }
   return JSON.stringify(values);
 }

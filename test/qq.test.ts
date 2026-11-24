@@ -1066,6 +1066,45 @@ describe("QQ 适配器（假官方 Gateway + REST）", () => {
     });
   });
 
+  it("跨平台转发：发给本平台会话，前缀标注来源平台与群/私聊", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const { platform } = startPlatform(fake, { groups: ["g1"] });
+    await fake.ready();
+
+    platform.relay({
+      platform: "telegram",
+      source: "Telegram",
+      channel: { kind: "group", id: "-1001200" },
+      author: { id: "7", name: "Bob" },
+      text: "来自 \n Telegram 的话",
+      messageId: "42",
+    });
+
+    await waitFor(() => fake.posts.length === 1, "跨平台转发");
+    // 转发只走自己的出站队列，不会回流成本平台的入站消息
+    expect(fake.posts[0]?.path).toBe("/v2/groups/g1/messages");
+    expect(fake.posts[0]?.body["content"]).toBe("[Telegram 群] Bob: 来自 Telegram 的话");
+  });
+
+  it("跨平台转发：私聊来源带「私聊」前缀", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const { platform } = startPlatform(fake, { groups: ["g1"] });
+    await fake.ready();
+
+    platform.relay({
+      platform: "telegram",
+      source: "Telegram",
+      channel: { kind: "private", id: "900" },
+      author: { id: "7", name: "Bob" },
+      text: "hello",
+    });
+
+    await waitFor(() => fake.posts.length === 1, "私聊来源转发");
+    expect(fake.posts[0]?.body["content"]).toBe("[Telegram 私聊] Bob: hello");
+  });
+
   it("401 时刷新 token 后重试成功", async () => {
     const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
     cleanup.push(() => fake.close());

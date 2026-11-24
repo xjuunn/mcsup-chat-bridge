@@ -43,6 +43,9 @@ const platformStats = s.object({
   delivered: s.integer({ min: 0 }),
   failed: s.integer({ min: 0 }),
   dropped: s.integer({ min: 0 }),
+  relayed: s.integer({ min: 0, label: "已转发" }),
+  relayFailed: s.integer({ min: 0, label: "转发失败" }),
+  relayDropped: s.integer({ min: 0, label: "转发丢弃" }),
 });
 
 const inboundStats = s.object({
@@ -51,6 +54,7 @@ const inboundStats = s.object({
   dropped: s.integer({ min: 0, label: "已丢弃" }),
   duplicates: s.integer({ min: 0, label: "重复" }),
   failed: s.integer({ min: 0, label: "失败" }),
+  relayed: s.integer({ min: 0, label: "已跨平台转发" }),
 });
 
 /** 桥尚未就绪时由入口层抛出；这里只要求解析器给出实例 */

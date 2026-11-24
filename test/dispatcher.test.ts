@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { PlatformDispatcher } from "../src/core/dispatcher.js";
 import type { NormalizedMessage } from "../src/core/types.js";
-import type { ChatPlatform } from "../src/platforms/types.js";
+import type { ChatPlatform, PlatformRelayMessage } from "../src/platforms/types.js";
 import type { LogClient } from "mcsup-plugin";
 
 const AT = "2026-11-21T12:00:00.000Z";
@@ -30,6 +30,7 @@ class Recorder implements ChatPlatform {
   public readonly id: string;
   public readonly title: string;
   public readonly received: NormalizedMessage[] = [];
+  public readonly relayed: PlatformRelayMessage[] = [];
   public started = 0;
   public stopped = 0;
   public stopReason = "";
@@ -37,6 +38,7 @@ class Recorder implements ChatPlatform {
   public gate: Promise<void> | undefined;
   public failing = false;
   public failStart = false;
+  public failRelay = false;
 
   public constructor(id = "rec") {
     this.id = id;
@@ -63,6 +65,13 @@ class Recorder implements ChatPlatform {
     } finally {
       this.inFlight -= 1;
     }
+  }
+
+  public relay(msg: PlatformRelayMessage): void {
+    if (this.failRelay) {
+      throw new Error("boom-relay");
+    }
+    this.relayed.push(msg);
   }
 
   public stop(reason: string): void {
@@ -236,5 +245,98 @@ describe("PlatformDispatcher", () => {
     dispatcher.deliver(message(1));
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(first.received.length).toBe(0);
+  });
+});
+
+const RELAY: PlatformRelayMessage = {
+  platform: "qq",
+  source: "QQ",
+  channel: { kind: "group", id: "g1" },
+  author: { id: "u1", name: "小A" },
+  text: "群里的话",
+};
+
+describe("跨平台转发队列", () => {
+  it("投给除来源平台之外、实现了 relay 的平台", async () => {
+    const qq = new Recorder("qq");
+    const telegram = new Recorder("telegram");
+    // 日志平台不实现 relay：内核不该给它建转发队列，也不该接收转发
+    const logPlatform: ChatPlatform = {
+      id: "log",
+      title: "log",
+      start() {},
+      deliver() {},
+      stop() {},
+    };
+    const dispatcher = new PlatformDispatcher([qq, telegram, logPlatform], {
+      capacity: 8,
+      log: fakeLog(),
+      onInbound: () => {},
+    });
+    await dispatcher.start();
+
+    expect(dispatcher.relay(RELAY)).toBe(1);
+    await until(() => telegram.relayed.length === 1);
+    expect(telegram.relayed[0]).toEqual(RELAY);
+    expect(qq.relayed).toHaveLength(0);
+
+    const stats = dispatcher.stats();
+    expect(stats[1]).toMatchObject({ relayed: 1, relayDropped: 0 });
+    expect(stats[0]?.relayed).toBe(0);
+    expect(stats[2]?.relayed).toBe(0);
+
+    await dispatcher.stop("done");
+  });
+
+  it("没有可接收平台时返回 0", async () => {
+    const qq = new Recorder("qq");
+    const dispatcher = new PlatformDispatcher([qq], {
+      capacity: 8,
+      log: fakeLog(),
+      onInbound: () => {},
+    });
+    await dispatcher.start();
+    expect(dispatcher.relay(RELAY)).toBe(0);
+    await dispatcher.stop("done");
+  });
+
+  it("转发失败只计数，不中断队列", async () => {
+    const bad = new Recorder("bad");
+    bad.failRelay = true;
+    const log = fakeLog();
+    const dispatcher = new PlatformDispatcher([bad], { capacity: 8, log, onInbound: () => {} });
+    await dispatcher.start();
+
+    expect(dispatcher.relay(RELAY)).toBe(1);
+    const warned = (): boolean =>
+      ((log.warn as unknown as { mock?: { calls: unknown[][] } }).mock?.calls ?? []).some((args) =>
+        String(args[0]).includes("跨平台转发失败"),
+      );
+    await until(warned);
+    expect(dispatcher.stats()[0]).toMatchObject({ relayed: 0, relayFailed: 1 });
+    expect(dispatcher.pending()).toBe(0);
+
+    await dispatcher.stop("done");
+  });
+
+  it("转发队列溢出时丢最旧并计数", async () => {
+    const slow = new Recorder("slow");
+    const gate = deferred();
+    slow.gate = gate.promise;
+    const dispatcher = new PlatformDispatcher([slow], { capacity: 2, log: fakeLog(), onInbound: () => {} });
+    await dispatcher.start();
+
+    // 先把消费者卡在一条出站消息上，转发只能排队
+    dispatcher.deliver(message(1));
+    await until(() => slow.inFlight === 1);
+    for (let seq = 1; seq <= 5; seq += 1) {
+      dispatcher.relay({ ...RELAY, messageId: `r${seq}` });
+    }
+    expect(dispatcher.stats()[0]).toMatchObject({ relayDropped: 3 });
+
+    gate.resolve();
+    await until(() => slow.relayed.length === 2);
+    expect(slow.relayed.map((item) => item.messageId)).toEqual(["r4", "r5"]);
+    await dispatcher.stop("done");
   });
 });

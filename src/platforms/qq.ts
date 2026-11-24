@@ -36,13 +36,14 @@ import type { LogClient } from "mcsup-plugin";
 import { LearnedTargets } from "../core/targets.js";
 import { CATEGORIES } from "../core/types.js";
 import type { MessageCategory, NormalizedMessage } from "../core/types.js";
-import { formatOutbound, splitText } from "./format.js";
+import { formatOutbound, formatRelay, splitText } from "./format.js";
 import type {
   ChatPlatform,
   PlatformContext,
   PlatformCreateOptions,
   PlatformFactory,
   PlatformInboundMessage,
+  PlatformRelayMessage,
 } from "./types.js";
 
 // 出站格式与分片由 `format.ts` 统一提供；这里再导出一次，保持既有引用稳定。
@@ -518,6 +519,31 @@ export class QqPlatform implements ChatPlatform {
     this.enqueue({ id: message.id, text });
   }
 
+  /**
+   * 接收其它平台转发来的消息并发送到本平台的会话目标。
+   *
+   * 只入自己的出站队列，不回流 `ctx.inbound`：来源平台已经处理过一次入站，
+   * 再回流就会形成 qq → telegram → qq 的环。由此平台侧也不需要额外的回声
+   * 窗口——转发路径与入站路径完全分开。
+   *
+   * 跨平台不复用媒体句柄：QQ 侧图片要先转存 `qqbot-media://`，Telegram 的
+   * `file_id` 在 QQ 上无效。正文里的 `[图片]` 之类占位原样保留，让接收方
+   * 知道原消息带图，但图片本身不发。
+   *
+   * 来源会话在本平台不存在时不需要排除：QQ 的会话 id 是 openid，与其它平台
+   * 的 id 空间不重叠，`exclude` 不会有命中。
+   */
+  public relay(message: PlatformRelayMessage): void {
+    if (this.stopping) {
+      return;
+    }
+    const text = formatRelay(message);
+    if (text === "") {
+      return;
+    }
+    this.enqueue({ id: `relay:${message.platform}:${message.messageId ?? message.at ?? ""}`, text });
+  }
+
   /** 入队一条已格式化的出站消息；超限时丢最旧，避免重连期间无限堆积 */
   private enqueue(pending: PendingSend): void {
     if (this.outQueue.length >= OUTBOUND_LIMIT) {
@@ -937,7 +963,7 @@ export class QqPlatform implements ChatPlatform {
 
   private onMessage(type: string, event: Record<string, unknown>): void {
     const ctx = this.ctx;
-    if (ctx === undefined || !this.settings.inbound) {
+    if (ctx === undefined) {
       return;
     }
     const messageId = stringOf(event["id"]);
@@ -1035,6 +1061,7 @@ export class QqPlatform implements ChatPlatform {
       author: { id: authorId, name: displayName },
       text,
       label: this.settings.label,
+      ...(this.settings.inbound ? {} : { inject: false }),
       ...(messageId === undefined ? {} : { messageId }),
       ...(stringOf(event["timestamp"]) === undefined ? {} : { at: stringOf(event["timestamp"])! }),
       ...(this.settings.server === undefined ? {} : { server: this.settings.server }),

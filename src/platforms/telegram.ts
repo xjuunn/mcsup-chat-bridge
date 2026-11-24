@@ -26,13 +26,14 @@ import type { LogClient } from "mcsup-plugin";
 import { LearnedTargets } from "../core/targets.js";
 import { CATEGORIES } from "../core/types.js";
 import type { MessageCategory, NormalizedMessage } from "../core/types.js";
-import { formatOutbound } from "./format.js";
+import { formatOutbound, formatRelay } from "./format.js";
 import type {
   ChatPlatform,
   PlatformContext,
   PlatformCreateOptions,
   PlatformFactory,
   PlatformInboundMessage,
+  PlatformRelayMessage,
 } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -77,7 +78,7 @@ export interface TelegramSettings {
 }
 
 const DEFAULT_API_BASE = "https://api.telegram.org";
-const USER_AGENT = "mcsup-chat-bridge/0.1.23 (TelegramBotAdapter)";
+const USER_AGENT = "mcsup-chat-bridge/0.1.24 (TelegramBotAdapter)";
 
 /** Telegram 单条文本上限 */
 const TEXT_LIMIT = 4_096;
@@ -421,6 +422,26 @@ export class TelegramPlatform implements ChatPlatform {
     this.enqueue({ id: message.id, text });
   }
 
+  /**
+   * 接收其它平台转发来的消息并发送到本平台的会话目标。
+   *
+   * 与 `deliver` 共用出站队列与限流，但不回流 `ctx.inbound`，因此转发不会
+   * 再触发一次入站处理，qq → telegram → qq 的环不存在。
+   *
+   * 跨平台不复用媒体：Telegram 的 `file_id` 只对同一个 bot 有效，QQ 的
+   * `qqbot-media://` 引用在这里也无意义。正文里的占位保留，图片本身不发。
+   */
+  public relay(message: PlatformRelayMessage): void {
+    if (this.stopping) {
+      return;
+    }
+    const text = formatRelay(message);
+    if (text === "") {
+      return;
+    }
+    this.enqueue({ id: `relay:${message.platform}:${message.messageId ?? message.at ?? ""}`, text });
+  }
+
   /** 入队一条已格式化的出站消息；超限时丢最旧，避免断线期间无限堆积 */
   private enqueue(pending: PendingSend): void {
     if (this.outQueue.length >= OUTBOUND_LIMIT) {
@@ -646,7 +667,7 @@ export class TelegramPlatform implements ChatPlatform {
 
   private onMessage(message: Record<string, unknown>): void {
     const ctx = this.ctx;
-    if (ctx === undefined || !this.settings.inbound) {
+    if (ctx === undefined) {
       return;
     }
     const chat = objectOf(message["chat"]);
@@ -760,6 +781,7 @@ export class TelegramPlatform implements ChatPlatform {
       author: { id: senderId, name: displayName },
       text,
       label: this.settings.label,
+      ...(this.settings.inbound ? {} : { inject: false }),
       ...(messageId === undefined ? {} : { messageId }),
       ...(date === undefined ? {} : { at: new Date(date * 1_000).toISOString() }),
       ...(this.settings.server === undefined ? {} : { server: this.settings.server }),

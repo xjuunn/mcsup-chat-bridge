@@ -9,6 +9,7 @@ QQ 与 Telegram 适配器支持**双向互通**：
 - 游戏 → 平台：玩家聊天按 `[玩家名]:消息` 发送到群/私聊；
 - 平台 → 游戏：群聊消息（可选私聊）经 `console:write` 注入游戏，显示为 `[QQ] 昵称: 消息` / `[Telegram] 昵称: 消息`；注入方式由 `injectMode` 决定（默认 `say` 会写进服务器日志，`tellraw` 只显示在游戏内）。
 - 两者都支持群聊与私聊**互相同步**（`qq.syncChannels` / `telegram.syncChannels`）；Telegram 复用 `file_id` 直接转发图片/视频/文件。
+- **跨平台同步**：QQ 与 Telegram 默认互相转发（`crossPlatform=true`），群里或私聊收到的消息会发到另一个平台的所有会话；转发形如 `[QQ 群] 昵称: 消息`，来源平台不回发自己。图片等媒体不跨平台搬运，只保留 `[图片]` 占位。
 
 ## 快速开始
 
@@ -159,6 +160,7 @@ test/                       分类、存储、分发、桥、入站、QQ、Teleg
 | `storeSize` | `200` | 环形缓存条数（10–5000） |
 | `queueCapacity` | `256` | 单平台出站与全局入站队列的积压上限（8–4096），超出丢最旧 |
 | `inbound` | `true` | 是否允许平台消息注入游戏；关闭后 QQ / Telegram 仍可出站 |
+| `crossPlatform` | `true` | 是否让平台之间互相同步：一个平台收到的消息转给其它所有启用了同步的平台（如 QQ ↔ Telegram）。与 `inbound` 独立：关掉入站只影响「平台 → 游戏」，平台之间仍互通；关掉它则各平台只与游戏双向。只有实现 `relay` 的适配器会接收转发，`log` / `null` 不接收 |
 | `inboundServer` | 自动 | 入站默认服务器；省略时选运行中的服务器 |
 | `inboundMaxLength` | `200` | 单条入站文本上限（32–512），超长截断 |
 | `injectMode` | `"say"` | 平台消息注入游戏的方式：`say` 会写入 `logs/latest.log`，但游戏内多出 `[Server]` 前缀；`tellraw` 游戏里只有 `[QQ]` / `[Telegram]` 标签但不写服务器日志（原版只有 `say`/`me` 这类服务器广播会进日志） |
@@ -175,7 +177,7 @@ test/                       分类、存储、分发、桥、入站、QQ、Teleg
 | `qq.privateUsers` | `[]` | 出站私聊 `user_openid`。**留空 = 全部**：入站不限对象，出站发给给机器人发过消息的用户。同样持久化在 `storage:kv` |
 | `qq.allowedUsers` | `[]` | 非空时只允许这些 openid 进入游戏 |
 | `qq.categories` | 沿用全局 | QQ 出站类别过滤 |
-| `qq.inbound` | `true` | 是否把 QQ 消息注入游戏 |
+| `qq.inbound` | `true` | 是否把 QQ 消息注入游戏；为 `false` 时仍参与群/私聊镜像与跨平台同步 |
 | `qq.allowPrivate` | `false` | 是否接收私聊（默认关闭，避免陌生人打扰） |
 | `qq.syncChannels` | `true` | 群聊与私聊互相同步：群里收到的消息也会发到私聊目标，私聊收到的也会发到群目标；只影响 QQ 内部会话，不影响游戏注入；来源会话不重复发送 |
 | `qq.forwardMedia` | `true` | 群/私聊互转时用一条消息转发图片（文字在前、图片在后）。QQ 表情统一转为 `[表情]` |
@@ -196,7 +198,7 @@ test/                       分类、存储、分发、桥、入站、QQ、Teleg
 | `telegram.privateUsers` | `[]` | 出站私聊 `user id`（数字或 `@username`）。**留空 = 全部**：出站发给给机器人发过消息的用户；同样持久化 |
 | `telegram.allowedUsers` | `[]` | 非空时只允许这些 `user id` / `@username` 的消息进入游戏 |
 | `telegram.categories` | 沿用全局 | Telegram 出站类别过滤 |
-| `telegram.inbound` | `true` | 是否把 Telegram 消息注入游戏 |
+| `telegram.inbound` | `true` | 是否把 Telegram 消息注入游戏；为 `false` 时仍参与群/私聊镜像与跨平台同步 |
 | `telegram.allowPrivate` | `false` | 是否接收私聊（默认关闭，避免陌生人打扰） |
 | `telegram.syncChannels` | `true` | 群聊与私聊互相同步：群里收到的消息也会发到私聊目标，私聊收到的也会发到群目标；来源会话不重复发送 |
 | `telegram.forwardMedia` | `true` | 群/私聊互转时转发图片/视频/动图/文件，复用 Telegram 的 `file_id`（不下载、不上传），文字在前、媒体在后 |
@@ -332,8 +334,8 @@ messages { "server": "survival", "limit": 20 }
 | `suppressed` | 注入游戏后又被宿主回显、被回声抑制的条数 |
 | `stored` | 当前缓存条数 |
 | `categories` | 各类别累计计数（不受环形淘汰影响） |
-| `platforms` | 每个平台的 `queued` / `delivered` / `failed` / `dropped` |
-| `inbound` | `received` / `delivered` / `dropped` / `duplicates` / `failed` |
+| `platforms` | 每个平台的 `queued` / `delivered` / `failed` / `dropped`，以及跨平台转发的 `relayed` / `relayFailed` / `relayDropped` |
+| `inbound` | `received` / `delivered` / `dropped` / `duplicates` / `failed`，以及 `relayed`（成功转给至少一个其它平台的条数） |
 
 ## QQ 机器人对接
 
@@ -371,6 +373,7 @@ messages { "server": "survival", "limit": 20 }
 | 游戏 → QQ | `[玩家名]:消息` | 玩家聊天严格使用此格式，例如 `[Steve]:你好` |
 | 游戏 → QQ（非聊天） | `[加入] Alex: Alex 加入了游戏` | 用中文类别标签，避免歧义 |
 | QQ → 游戏 | `[QQ] 昵称: 消息` | 通过 `injectMode` 注入（默认 `say`，游戏内会多出 `[Server]` 前缀；改成 `tellraw` 则只有单标签）；可选 `qq.server` / `inboundServer` |
+| QQ → 其它平台 | `[QQ 群] 昵称: 消息` / `[QQ 私聊] 昵称: 消息` | 跨平台同步（`crossPlatform`），发到 Telegram 的所有会话；只转发文本，图片等媒体保留 `[图片]` 占位，不回发来源平台 |
 
 出站只发送纯文本（或显式开启的 Markdown），不拼任何平台标记；入站会把 `<@openid>` 映射成昵称、去掉机器人自身的 @，附件转为 `[图片]` / `[语音] ASR` / `[文件: 名称]` 占位文本。
 
@@ -383,6 +386,7 @@ messages { "server": "survival", "limit": 20 }
 - **去重**：入站按消息 id 记忆最近 1000 条，桥内核再按 `platform:id` 去重 10 分钟；重连后不会重复注入。
 - **过滤**：只接收 `qq.groups` 内的群与 `qq.privateUsers` 内的私聊；`allowedUsers` 可进一步收窄发言人；机器人自己的消息不会被回灌。
 - **群/私聊互通**：`qq.syncChannels`（默认 `true`）把一条 QQ 消息再发到除来源会话之外的所有目标：群里发的进私聊、私聊发的进群。消息带 `[群]` / `[私聊]` 前缀，来源会话跳过所以不会重复；机器人自己发的消息不触发入站事件，不会回环。图片（`qq.forwardMedia=true`）用**一条消息**转发：`qq.mediaMode=markdown`（默认）先转存平台素材库，再发单条 Markdown 图文 `[群] 昵称: 文字 ![图片 #宽px #高px](qqbot-media://...)`，文字在前、图片在后，手机 QQ 也能显示（实验确认：Markdown 图片不带宽高时手机和电脑都只显示 `[图片]`）。普通图片按最长边 480px 等比缩小，纯表情贴纸按 160px 缩小，避免表情被放大；`rich` 发单条富媒体（图片在上、文字在下）。素材引用保留 90 天滑动有效，配额满 100 张时自动淘汰最旧的一半。Markdown 转存或发送失败会自动退回 `rich`。纯表情消息会把贴纸并进同一条消息，不再额外补一条 `[表情]`；无贴纸可转发时显示 `[表情]` 文本。
+- **跨平台同步**：`crossPlatform=true`（默认）时，QQ 收到的消息会以 `[QQ 群] 昵称: 消息` / `[QQ 私聊] 昵称: 消息` 发给 Telegram 的全部会话。转发只走 Telegram 自己的出站队列，不回流 `ctx.inbound`，不会成环；来源平台由内核排除。跨平台不搬运媒体，正文保留 `[图片]` 等占位。
 - **出站目标（跨重启）**：`qq.groups` / `qq.privateUsers` 留空时，目标取「收到过消息的会话」。这份记录写在宿主 `storage:kv`（键 `qq:targets`，文件在 `plugin-data/chat-bridge/kv/`，按插件 id 划分，插件升级不丢），只在真的新增/淘汰会话时写一次，写入失败只告警一次且不影响收发。未授予 `storage:kv` 时退化为进程内记忆并在日志说明。群的 `group_openid` 只能在群消息或入群事件里得知，所以群从未说过话时私聊镜像无处可发——这时会告警一次「私聊镜像暂时发不到群」，补一条群消息或填上 `qq.groups` 即可。
 - **注入安全**：`tellraw` 用 JSON 组件转义、`say` 用单行文本；两种方式都过滤控制字符，并在桥内核按注入文本做 60 秒回声抑制，避免「游戏 → QQ → 游戏」自激。注入成功时会在插件日志写一行 `[qq] 注入 <server>：[QQ] 昵称: 消息`，便于核对。
 - **注入方式与日志**：原版 Minecraft 只有 `say`/`me` 这类服务器广播会写进 `logs/latest.log`。因此「游戏内只有 `[QQ]` 标签」与「QQ 消息出现在服务器日志」不可兼得：默认 `injectMode="say"` 让日志可查，但游戏内会显示 `[Server] [QQ] ...`；改成 `injectMode="tellraw"` 则只有单标签，服务器日志里没有。
@@ -456,6 +460,7 @@ messages { "server": "survival", "limit": 20 }
 | 游戏 → Telegram（非聊天） | `[加入] Alex: Alex 加入了游戏` | 用中文类别标签，避免歧义 |
 | Telegram → 游戏 | `[Telegram] 昵称: 消息` | 通过 `injectMode` 注入（默认 `say`，游戏内会多出 `[Server]` 前缀；改成 `tellraw` 则只有单标签）；可选 `telegram.server` / `inboundServer` |
 | Telegram 群 ↔ 私聊 | `[群] 昵称: ...` / `[私聊] 昵称: ...` | `syncChannels` 镜像，来源会话不重复发送 |
+| Telegram → 其它平台 | `[Telegram 群] 昵称: 消息` / `[Telegram 私聊] 昵称: 消息` | 跨平台同步（`crossPlatform`），发到 QQ 的所有会话；只转发文本，媒体保留占位，不回发来源平台 |
 
 入站会把图片、视频、动图、语音、音频、视频消息、表情、文件、位置、投票、联系人、
 骰子转成 `[图片]` / `[视频]` / `[文件: 名称]` 之类的占位文本；一个消息只会有一种媒体
@@ -481,6 +486,11 @@ messages { "server": "survival", "limit": 20 }
   前缀；机器人自己发的消息不会触发入站，因此不会回环。媒体（`forwardMedia=true`）
   跟在文字后面用 `file_id` 转发；没有群目标时会告警一次「私聊镜像暂时发不到群」，
   补一条群消息或填上 `telegram.groups` 即可。
+- **跨平台同步**：`crossPlatform=true`（默认）时，QQ 收到的消息会以
+  `[QQ 群] 昵称: 消息` 发给 Telegram 的全部会话，反之同理。转发走适配器自己的
+  出站队列，不回流 `ctx.inbound`，所以不会形成 qq → telegram → qq 的环；来源平台
+  由内核排除。跨平台不搬运媒体：QQ 需要 `qqbot-media://`、Telegram 用 `file_id`，
+  两者不通用，只保留正文里的 `[图片]` 等占位。
 - **出站目标（跨重启）**：`telegram.groups` / `telegram.privateUsers` 留空时，目标
   取「收到过消息的会话」，写在宿主 `storage:kv`（键 `telegram:targets`），只在真的
   新增/淘汰会话时写一次；未授予 `storage:kv` 时退化为进程内记忆。机器人入群时
@@ -607,9 +617,15 @@ matrix: s.optional(
 - 队列满时内核丢最旧消息并计入 `dropped`，适配器不需要处理背压。
 - `deliver` 抛错只计入 `failed` 并记日志，不会打断消费者，也不影响其他平台。
 - 连接、重连、限流、鉴权都由适配器自己负责；内核只提供 `AbortSignal` 与 `stop(reason)`。
-- **入站**：适配器收到外部消息后调用 `ctx.inbound({ platform, channel, author, text, messageId? })`；
+- **入站**：适配器收到外部消息后调用 `ctx.inbound({ platform, channel, author, text, messageId?, inject? })`；
   内核统一做去重、长度限制、排队、回声抑制，并通过 `ctx.game` 注入游戏。
+  平台自己的 `inbound=false` 设成 `inject: false`，只停注入，消息仍参与跨平台同步；
   适配器不需要知道服务器选择、注入命令或队列细节。
+- **跨平台**：适配器可选地实现 `relay(message)`，内核会把「其它平台」收到的消息
+  投给它；不实现就永远收不到转发（`log` / `null` 如此）。判断依据是「有没有这个
+  方法」，不是平台 id，新平台无需改内核。`relay` 只把已格式化的文本发进自己的
+  出站队列，禁止回流 `ctx.inbound`，否则会成环；来源平台由内核排除，媒体不跨平台
+  搬运。
 - **降级**：`ctx.game` 在未授予 `console:write` 时为 `undefined`；适配器只负责上报消息，
   内核会记录失败计数，不要求适配器自己判断权限。
 - 平台 id 必须匹配 `^[a-z][a-z0-9-]{0,31}$`，且与 `create()` 返回实例的 `id` 一致。
@@ -644,6 +660,9 @@ npm run test:real   # 真实进程 + 真实 TCP 端点
 - 配置默认值、去重、平台配置切片、QQ / Telegram 配置片段与入站默认值、注册表重复与非法 id
 - 事件负载校验、非法时间回退、缺失服务器名兜底
 - **入站**：格式化注入、`inboundServer`、去重、截断、全局关闭、无 `console:write` 降级、回声抑制
+- **跨平台同步**：转发目标选择（排除来源平台、只投给实现 `relay` 的平台）、
+  `crossPlatform` 开关、入站与跨平台两条边互相独立、无接收方时不计 `relayed`、
+  转发队列溢出与失败计数
 - **QQ**：配置校验与默认值、`[玩家名]:消息` 格式、官方入站事件归一（@ 映射/附件/引用）、
   假 Gateway 上的 Identify、被动回复 `msg_id+msg_seq`、白名单、去重、Markdown、401 刷新 token、分片与关闭码处理
 - **Telegram**：配置校验与默认值、假 Bot API 长轮询（挂起 / 唤醒 / offset 前进）、
@@ -688,7 +707,7 @@ Windows 启动器经 `cmd.exe /d /s /c` 调用，并使用 `windowsVerbatimArgum
 ## 已知限制 / 下一步
 
 - 已内置 QQ 官方机器人（API v2）与 Telegram Bot API（长轮询）；Discord 等平台可按同一契约继续添加。
-- 入站只处理文本与常见消息段（图片/语音/文件转为占位文本）；不把媒体内容落盘。Telegram 的群/私聊镜像可直接复用 `file_id` 转发媒体；QQ 需要先转存平台素材库。QQ 不支持回复链与话题线程，Telegram 支持论坛话题（`message_thread_id`）。
+- 入站只处理文本与常见消息段（图片/语音/文件转为占位文本）；不把媒体内容落盘。Telegram 的群/私聊镜像可直接复用 `file_id` 转发媒体；QQ 需要先转存平台素材库。QQ 不支持回复链与话题线程，Telegram 支持论坛话题（`message_thread_id`）。跨平台（QQ ↔ Telegram）只转发文本，媒体句柄不通用，正文保留 `[图片]` 等占位。
 - QQ 官方机器人在群聊默认只能收到 @ 消息；全量群消息需在开放平台开通权限，并受官方主动消息频控约束。Telegram 需要在 BotFather 关闭 privacy mode 才能收到群内全部消息。
 - 与真实 QQ / Telegram 端联调需要用户提供 QQ AppID/ClientSecret、Telegram bot token 与机器人环境；仓库内 QQ 用真实 HTTP + WebSocket 假服务端、Telegram 用真实 HTTP 长轮询假服务端验证协议链路。
 - 插件静态订阅 `console:line`，无法运行期退订；高噪音环境靠 `consoleForward` / `forwardCategories` 控制转发。

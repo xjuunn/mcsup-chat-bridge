@@ -668,6 +668,55 @@ describe("Telegram 适配器（假 Bot API）", () => {
     platform.deliver(message({ text: "游戏消息" }));
   });
 
+  it("跨平台转发：发给本平台会话，前缀标注来源平台与群/私聊", async () => {
+    const fake = await startFakeTelegram();
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    const { platform } = startPlatform(fake, {}, inbound);
+
+    // 先由入站学习一个群目标，再清掉这次入站可能产生的发送
+    fake.push(groupUpdate(1, -100, "本地消息"));
+    await waitFor(() => inbound.length === 1, "群入站");
+    fake.sends.length = 0;
+
+    platform.relay({
+      platform: "qq",
+      source: "QQ",
+      channel: { kind: "group", id: "g1" },
+      author: { id: "42", name: "Alice" },
+      text: "QQ 群里的话",
+      messageId: "m1",
+    });
+
+    await waitFor(() => fake.sends.length >= 1, "转发到群");
+    const relayed = fake.sends[0];
+    expect(relayed?.body["chat_id"]).toBe("-100");
+    expect(relayed?.body["text"]).toBe("[QQ 群] Alice: QQ 群里的话");
+  });
+
+  it("跨平台转发：私聊来源带「私聊」前缀", async () => {
+    const fake = await startFakeTelegram();
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    const { platform } = startPlatform(fake, { allowPrivate: true }, inbound);
+
+    fake.push(privateUpdate(1, "先私聊"));
+    await waitFor(() => inbound.length === 1, "私聊入站");
+    fake.sends.length = 0;
+
+    platform.relay({
+      platform: "qq",
+      source: "QQ",
+      channel: { kind: "private", id: "u1" },
+      author: { id: "42", name: "Alice" },
+      text: "私聊来的",
+    });
+
+    await waitFor(() => fake.sends.length >= 1, "转发到私聊");
+    expect(fake.sends[0]?.body["chat_id"]).toBe("42");
+    expect(fake.sends[0]?.body["text"]).toBe("[QQ 私聊] Alice: 私聊来的");
+  });
+
   it("媒体镜像复用 file_id，并把文字与媒体分开送达", async () => {
     const fake = await startFakeTelegram();
     cleanup.push(() => fake.close());

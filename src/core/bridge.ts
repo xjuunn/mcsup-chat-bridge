@@ -4,9 +4,16 @@
  * 不依赖 SDK 的 op / 事件 API，只接收 `EventMeta` 与原始负载；这样单测可以
  * 直接驱动内核，插件入口（`src/index.ts`）只做「接线」。
  *
- * 入站是独立的第二条边：适配器把平台原生事件翻译为 `PlatformInboundMessage`
- * 后交给内核，内核统一做白名单之外的去重、长度限制、排队、回声抑制与注入。
- * 平台适配器因此不需要知道游戏端如何选服务器、如何转义。
+ * 入站与跨平台同步是两条不同的边：
+ * - 入站：适配器把平台原生事件翻译为 `PlatformInboundMessage` 后交给内核，
+ *   内核统一做白名单之外的去重、长度限制、排队、回声抑制与注入游戏。
+ * - 跨平台：同一条入站消息在注入游戏的同时，由内核投给**除来源之外的每个
+ *   实现了 `relay` 的平台**。适配器只需要把格式化好的文本发给自己的会话
+ *   目标，不必知道还有谁在线，也不需要平台之间两两直接对接。
+ *
+ * 这样「谁负责判定」仍然只有一处：能不能转发、转给谁、是否与来源平台相同，
+ * 全在 {@link ChatBridge.handleInbound} 里决定；适配器只负责发送。
+ * 平台适配器不需要知道游戏端如何选服务器、如何转义。
  */
 
 import { PluginError } from "mcsup-plugin";
@@ -19,6 +26,7 @@ import type {
   GamePort,
   InjectMode,
   PlatformInboundMessage,
+  PlatformRelayMessage,
 } from "../platforms/types.js";
 import { PlatformDispatcher, type PlatformStats } from "./dispatcher.js";
 import { MessageStore } from "./store.js";
@@ -34,6 +42,13 @@ export interface BridgeConfig {
   readonly queueCapacity: number;
   /** 是否允许平台消息注入游戏 */
   readonly inbound: boolean;
+  /**
+   * 是否把从一个平台收到的消息转发给其它平台（默认 true）。
+   *
+   * 与 `inbound` 是两条独立的边：关掉入站只影响「平台 → 游戏」，
+   * 平台之间仍然互通；关掉它则只有游戏与各平台之间双向，平台之间不串。
+   */
+  readonly crossPlatform: boolean;
   /** 入站默认服务器；省略时由 GamePort 自动选择 */
   readonly inboundServer?: string;
   /** 单条入站文本上限 */
@@ -75,6 +90,8 @@ export interface InboundStats {
   readonly duplicates: number;
   /** 注入失败的条数（无服务器、无权限、宿主报错） */
   readonly failed: number;
+  /** 成功转给其它平台（至少投给一个）的条数 */
+  readonly relayed: number;
 }
 
 /** `status` op 的数据源 */
@@ -140,12 +157,15 @@ export class ChatBridge {
     dropped: 0,
     duplicates: 0,
     failed: 0,
+    relayed: 0,
   };
   private readonly inboundSeen = new Map<string, number>();
   private readonly echoWindow: Array<{ readonly text: string; readonly at: number }> = [];
   /** 结构化聊天与控制台投影的跨源去重表：`from\u0000text` → 时间戳 */
   private readonly structuredChat = new Map<string, number>();
   private readonly projectedChat = new Map<string, number>();
+  /** 跨平台转发是否可用的告警只打一次 */
+  private crossWarned = false;
 
   public constructor(options: BridgeOptions) {
     this.log = options.log;
@@ -269,18 +289,25 @@ export class ChatBridge {
   }
 
   /**
-   * 平台 → 游戏。适配器在收到外部消息后调用；这里立即返回（只入队）。
+   * 平台 → 游戏，以及平台 → 其它平台。适配器在收到外部消息后调用；这里立即
+   * 返回（只入队）。
    *
    * 去重与长度限制在入口做，注入在独立消费者里串行执行，避免慢游戏端拖住
    * 平台适配器的收包循环。
+   *
+   * 两条边共用同一份去重结果：同一条平台消息只会被处理一次，然后同时进
+   * 「注入游戏」与「转给其它平台」两条路径。任何一边关闭都不影响另一边。
    */
   public handleInbound(message: PlatformInboundMessage): void {
     this.inboundStats.received += 1;
-    if (!this.config.inbound) {
+    if (!this.started) {
       this.inboundStats.dropped += 1;
       return;
     }
-    if (!this.started) {
+    // 平台自己的 inbound 开关只关掉「注入游戏」，跨平台同步仍然生效。
+    const inject = this.config.inbound && message.inject !== false;
+    // 两条边都关掉才算真的丢：只关一条时另一条仍要工作。
+    if (!inject && !this.config.crossPlatform) {
       this.inboundStats.dropped += 1;
       return;
     }
@@ -295,6 +322,13 @@ export class ChatBridge {
       return;
     }
 
+    if (this.config.crossPlatform) {
+      this.relayInbound(message, text);
+    }
+
+    if (!inject) {
+      return;
+    }
     if (this.inboundQueue.length >= this.config.queueCapacity) {
       this.inboundQueue.shift();
       this.inboundStats.dropped += 1;
@@ -316,6 +350,42 @@ export class ChatBridge {
 
   public recent(filter: MessageFilter = {}): MessagePage {
     return this.store.recent(filter);
+  }
+
+  /**
+   * 把一条入站消息转给其它平台。
+   *
+   * `source` 取平台标签（`QQ` / `Telegram`），适配器据此拼 `[QQ] 昵称: ...`；
+   * 拿不到标签时退回大写的平台 id，任何平台都能被转发。
+   */
+  private relayInbound(message: PlatformInboundMessage, text: string): void {
+    const relayMessage: PlatformRelayMessage = {
+      platform: message.platform,
+      source: message.label ?? message.platform.toUpperCase(),
+      channel: message.channel,
+      author: message.author,
+      text,
+      ...(message.messageId === undefined ? {} : { messageId: message.messageId }),
+      ...(message.at === undefined ? {} : { at: message.at }),
+    };
+    let queued = 0;
+    try {
+      queued = this.dispatcher?.relay(relayMessage) ?? 0;
+    } catch (error) {
+      this.log.warn(`跨平台转发失败：${errorText(error)}`);
+      return;
+    }
+    if (queued > 0) {
+      this.inboundStats.relayed += 1;
+      return;
+    }
+    if (!this.crossWarned && this.config.platforms.length > 1) {
+      this.crossWarned = true;
+      this.log.warn(
+        "没有可接收跨平台转发的其它平台（只有实现了 relay 的适配器会接收，" +
+          "内置的 log / null 不接收）；平台之间不会同步",
+      );
+    }
   }
 
   public status(): BridgeStatus {

@@ -24,6 +24,7 @@ const BASE: BridgeConfig = {
   storeSize: 10,
   queueCapacity: 8,
   inbound: true,
+  crossPlatform: true,
   inboundMaxLength: 200,
   injectMode: "tellraw",
   platformSettings: {},

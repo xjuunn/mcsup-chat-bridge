@@ -333,6 +333,8 @@ export interface ChatPlatform {
   readonly title: string;
   start(ctx: PlatformContext): void | Promise<void>;
   deliver(message: NormalizedMessage): void | Promise<void>;
+  /** 可选：接收其它平台转发来的消息，投给本平台的会话目标 */
+  relay?(message: PlatformRelayMessage): void | Promise<void>;
   stop(reason: string): void | Promise<void>;
 }
 
@@ -413,6 +415,18 @@ export interface GamePort {
 | 目标 + 载荷 + 送达结果 | 暂未改契约：适配器内部重试并记录，`status` 仍只有 `queued/delivered/failed/dropped`（§5.4 第 1、2 条仍是下一步） |
 
 与 QQ 适配器的差异：Telegram 不需要「先上传素材」就能跨会话转发媒体（`file_id` 由同一 bot 持有），因此群/私聊镜像比 QQ 的 Markdown/富媒体转存链路短；反过来，Telegram 没有 QQ 的被动回复额度模型，限流主要靠本地 `sendIntervalMs` 与 429 响应。
+
+### 5.6 跨平台同步：`relay` 作为可选能力
+
+QQ 与 Telegram 各自内部的群↔私聊镜像（`syncChannels`）只解决「同一平台内两个会话」的互通，不能让 QQ 与 Telegram 互相看到消息。跨平台同步因此单独做一条边，判定收敛在内核：
+
+- 内核（`ChatBridge.handleInbound`）在去重、截断之后，把同一条入站消息投给**除来源平台之外、实现了 `relay` 的平台**；来源平台由 `PlatformDispatcher.relay` 按 `platform.id` 排除。
+- `relay` 是可选方法：`log` / `null` 不实现，就自然收不到转发；QQ / Telegram 实现后自动接入，内核不需要按平台 id 特判。这与 OpenClaw/Hermes 的「适配器之间两两对接」不同，新平台只要实现一个方法就能参与全互连。
+- 转发只写适配器自己的出站队列，**不回流 `ctx.inbound`**：入站路径只走一次，qq → telegram → qq 的环不存在，也不需要依赖平台侧回声窗口。
+- 跨平台不做媒体搬运：QQ 的图片要先转存 `qqbot-media://`，Telegram 的 `file_id` 只对同一个 bot 有效，两边不对称。正文里的 `[图片]` / `[视频]` 等占位原样保留，让接收方知道原消息带媒体。
+- 文本格式由 `src/platforms/format.ts` 的 `formatRelay` 统一：`[QQ 群] 昵称: 消息` / `[Telegram 私聊] 昵称: 消息`，接收方一眼看出说话的平台与场所。
+- 与 `inbound` 解耦：关掉入站只影响「平台 → 游戏」，平台之间仍同步；`crossPlatform=false` 则只保留游戏与各平台的双向，平台之间不串。
+- 计费影响：双向全转发会让发送量翻倍，需对照 QQ 主动消息频控（1000 条/天/群）与 Telegram 约 20 条/分钟/群的限制；高频服务器可只保留 `chat` 类别或关闭 `crossPlatform`。
 
 ---
 

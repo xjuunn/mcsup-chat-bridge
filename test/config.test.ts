@@ -80,10 +80,12 @@ describe("配置解析", () => {
   it("入站开关与上限有默认值，且可覆盖", () => {
     const defaults = resolveConfig(parse({}));
     expect(defaults.inbound).toBe(true);
+    expect(defaults.crossPlatform).toBe(true);
     expect(defaults.inboundMaxLength).toBe(200);
     expect(defaults.injectMode).toBe("say");
-    const custom = resolveConfig(parse({ inbound: false, inboundServer: "creative", inboundMaxLength: 64, injectMode: "say" }));
+    const custom = resolveConfig(parse({ inbound: false, crossPlatform: false, inboundServer: "creative", inboundMaxLength: 64, injectMode: "say" }));
     expect(custom.inbound).toBe(false);
+    expect(custom.crossPlatform).toBe(false);
     expect(custom.inboundServer).toBe("creative");
     expect(custom.inboundMaxLength).toBe(64);
     expect(custom.injectMode).toBe("say");

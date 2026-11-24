@@ -51,6 +51,13 @@ export const configSchema = s.object({
     label: "允许平台消息进入游戏",
     describe: "为 false 时平台仍可出站，但 QQ 等外部消息不会注入游戏",
   }),
+  crossPlatform: s.boolean({
+    default: true,
+    label: "平台之间互相同步",
+    describe:
+      "为 true（默认）时，一个平台收到的消息会转给其它所有启用的平台，QQ 与 Telegram 因此互通；" +
+      "为 false 时各平台只与游戏互通，平台之间不串。与「允许平台消息进入游戏」互相独立",
+  }),
   inboundServer: s.optional(
     s.string({
       max: 64,
@@ -437,6 +444,7 @@ export function resolveConfig(raw: RawConfig): BridgeConfig {
     storeSize: raw.storeSize ?? 200,
     queueCapacity: raw.queueCapacity ?? 256,
     inbound: raw.inbound ?? true,
+    crossPlatform: raw.crossPlatform ?? true,
     inboundMaxLength: raw.inboundMaxLength ?? 200,
     injectMode: raw.injectMode ?? "say",
     ...(raw.inboundServer === undefined ? {} : { inboundServer: raw.inboundServer }),

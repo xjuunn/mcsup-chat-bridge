@@ -51,3 +51,26 @@ export function splitText(text: string, max: number): string[] {
   }
   return chunks;
 }
+
+/**
+ * 跨平台转发的文本格式（各平台共用）
+ *
+ * 接收方看不到来源平台的会话结构，所以前缀必须带上两件事：哪个平台、
+ * 群还是私聊。`[QQ 群] 昵称: 消息` 一眼能看出说话的地方，也不必给每个
+ * 平台各写一套前缀规则。
+ *
+ * 媒体不跨平台搬运：QQ 的图片要先转存 `qqbot-media://`、Telegram 用
+ * `file_id`，两边不对称。正文里的 `[图片]` 这类占位原样保留，让接收方
+ * 至少知道「原来有图」。
+ */
+export function formatRelay(message: {
+  readonly source: string;
+  readonly channel: { readonly kind: "group" | "private" };
+  readonly author: { readonly name: string };
+  readonly text: string;
+}): string {
+  const where = message.channel.kind === "group" ? "群" : "私聊";
+  const author = message.author.name.trim() === "" ? "未知" : message.author.name.trim();
+  const text = message.text.replace(/\s+/g, " ").trim();
+  return `[${message.source} ${where}] ${author}: ${text}`;
+}

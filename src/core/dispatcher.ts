@@ -6,14 +6,24 @@
  * - 队列有界：满了丢最旧（聊天桥宁可丢旧消息，也不能让内存无界增长）。
  *   用固定大小的环形缓冲实现，丢最旧与写入都是 O(1)，慢消费者不会让
  *   数组无限增长。
- * - 单平台内保序：`deliver` 串行调用，适配器不必自己排队。
- * - 故障隔离：`deliver` 抛错只记日志与计数，不中断消费者。
+ * - 单平台内保序：`deliver` / `relay` 串行调用，适配器不必自己排队。
+ * - 故障隔离：`deliver` / `relay` 抛错只记日志与计数，不中断消费者。
+ *
+ * 两条队列用同一套环形缓冲：`out` 是游戏 → 平台（`NormalizedMessage`），
+ * `relay` 是平台 → 平台（`PlatformRelayMessage`）。跨平台转发的队列只
+ * 存在于实现了 `relay` 的平台槽位上：日志 / 空平台不实现就压根没有这条
+ * 队列，内核不需要按平台 id 特判「谁能接收转发」。
  */
 
 import type { LogClient } from "mcsup-plugin";
 
 import type { NormalizedMessage } from "../core/types.js";
-import type { ChatPlatform, GamePort, PlatformInboundMessage } from "../platforms/types.js";
+import type {
+  ChatPlatform,
+  GamePort,
+  PlatformInboundMessage,
+  PlatformRelayMessage,
+} from "../platforms/types.js";
 
 export interface DispatcherOptions {
   /** 每个平台的最大排队数（不含正在投递的那条） */
@@ -35,17 +45,29 @@ export interface PlatformStats {
   readonly delivered: number;
   readonly failed: number;
   readonly dropped: number;
+  /** 跨平台转发：已成功交给适配器 */
+  readonly relayed: number;
+  /** 跨平台转发：适配器抛错 */
+  readonly relayFailed: number;
+  /** 跨平台转发：因队列溢出丢弃 */
+  readonly relayDropped: number;
 }
 
-interface Slot {
-  readonly platform: ChatPlatform;
-  /** 固定长度；`(read + count) % capacity` 是下一个写入位置 */
-  readonly buffer: Array<NormalizedMessage | undefined>;
+/** 固定长度的环形缓冲；`(read + count) % capacity` 是下一个写入位置 */
+interface Channel<T> {
+  readonly buffer: Array<T | undefined>;
   read: number;
   count: number;
   delivered: number;
   failed: number;
   dropped: number;
+}
+
+interface Slot {
+  readonly platform: ChatPlatform;
+  readonly out: Channel<NormalizedMessage>;
+  /** 只有实现了 `relay` 的平台才有这条队列 */
+  readonly relay: Channel<PlatformRelayMessage> | undefined;
   /** 队列空时消费者挂在这里等下一次投递 */
   wake: (() => void) | undefined;
 }
@@ -64,12 +86,13 @@ export class PlatformDispatcher {
     this.capacity = Math.max(1, Math.trunc(options.capacity));
     this.slots = platforms.map((platform) => ({
       platform,
-      buffer: new Array<NormalizedMessage | undefined>(this.capacity).fill(undefined),
-      read: 0,
-      count: 0,
-      delivered: 0,
-      failed: 0,
-      dropped: 0,
+      out: createChannel<NormalizedMessage>(this.capacity),
+      // 判断依据是「有没有这个方法」，不是平台 id：新增平台只要实现
+      // `relay` 就自动接入跨平台同步。
+      relay:
+        typeof platform.relay === "function"
+          ? createChannel<PlatformRelayMessage>(this.capacity)
+          : undefined,
       wake: undefined,
     }));
   }
@@ -104,24 +127,42 @@ export class PlatformDispatcher {
     }
   }
 
-  /** 投递一条消息；平台未运行或队列满时按策略丢弃并计数 */
+  /** 投递一条游戏消息；平台未运行或队列满时按策略丢弃并计数 */
   public deliver(message: NormalizedMessage): void {
     if (!this.running) {
       return;
     }
     for (const slot of this.slots) {
-      if (slot.count >= this.capacity) {
-        // 丢最旧：把读指针向前推一格，写指针会正好落在被丢弃的槽位上
-        slot.buffer[slot.read] = undefined;
-        slot.read = (slot.read + 1) % this.capacity;
-        slot.count -= 1;
-        slot.dropped += 1;
-      }
-      const write = (slot.read + slot.count) % this.capacity;
-      slot.buffer[write] = message;
-      slot.count += 1;
+      push(slot.out, message);
       this.wake(slot);
     }
+  }
+
+  /**
+   * 跨平台转发一条入站消息：投给「除来源平台之外」所有实现了 `relay` 的平台。
+   *
+   * 返回实际入队的平台数（0 表示没有别的平台能接收）。
+   *
+   * 不在这里递归：适配器收到的转发只走自己的出站队列，不会再回流到
+   * `onInbound`，因此 qq → telegram → qq 的环不存在。
+   */
+  public relay(message: PlatformRelayMessage): number {
+    if (!this.running) {
+      return 0;
+    }
+    let queued = 0;
+    for (const slot of this.slots) {
+      if (slot.relay === undefined) {
+        continue;
+      }
+      if (slot.platform.id === message.platform) {
+        continue;
+      }
+      push(slot.relay, message);
+      this.wake(slot);
+      queued += 1;
+    }
+    return queued;
   }
 
   /** 停止：先排空队列，再 abort 信号并调用平台 stop；都有超时上限 */
@@ -157,36 +198,51 @@ export class PlatformDispatcher {
     return this.slots.map((slot) => ({
       id: slot.platform.id,
       title: slot.platform.title,
-      queued: slot.count,
-      delivered: slot.delivered,
-      failed: slot.failed,
-      dropped: slot.dropped,
+      queued: slot.out.count,
+      delivered: slot.out.delivered,
+      failed: slot.out.failed,
+      dropped: slot.out.dropped,
+      relayed: slot.relay?.delivered ?? 0,
+      relayFailed: slot.relay?.failed ?? 0,
+      relayDropped: slot.relay?.dropped ?? 0,
     }));
   }
 
   public pending(): number {
-    return this.slots.reduce((sum, slot) => sum + slot.count, 0);
+    return this.slots.reduce((sum, slot) => sum + slot.out.count + (slot.relay?.count ?? 0), 0);
   }
 
   private async consume(slot: Slot): Promise<void> {
     for (;;) {
-      while (slot.count > 0) {
-        const message = slot.buffer[slot.read];
-        slot.buffer[slot.read] = undefined;
-        slot.read = (slot.read + 1) % this.capacity;
-        slot.count -= 1;
-        if (message === undefined) {
+      for (;;) {
+        const message = take(slot.out);
+        if (message !== undefined) {
+          try {
+            await slot.platform.deliver(message);
+            slot.out.delivered += 1;
+          } catch (error) {
+            slot.out.failed += 1;
+            this.options.log.warn(
+              `[${slot.platform.id}] 投递失败（${message.id}）：${errorText(error)}`,
+            );
+          }
           continue;
         }
-        try {
-          await slot.platform.deliver(message);
-          slot.delivered += 1;
-        } catch (error) {
-          slot.failed += 1;
-          this.options.log.warn(
-            `[${slot.platform.id}] 投递失败（${message.id}）：${errorText(error)}`,
-          );
+
+        const relayed = take(slot.relay);
+        if (relayed !== undefined && slot.relay !== undefined) {
+          try {
+            await slot.platform.relay?.(relayed);
+            slot.relay.delivered += 1;
+          } catch (error) {
+            slot.relay.failed += 1;
+            this.options.log.warn(
+              `[${slot.platform.id}] 跨平台转发失败（${relayed.platform}）：${errorText(error)}`,
+            );
+          }
+          continue;
         }
+        break;
       }
       if (!this.running) {
         return;
@@ -203,6 +259,43 @@ export class PlatformDispatcher {
     slot.wake = undefined;
     wake?.();
   }
+}
+
+function createChannel<T>(capacity: number): Channel<T> {
+  return {
+    buffer: new Array<T | undefined>(capacity).fill(undefined),
+    read: 0,
+    count: 0,
+    delivered: 0,
+    failed: 0,
+    dropped: 0,
+  };
+}
+
+/** 写入一条；队列满时丢最旧，读指针前移一格让写指针正好落在被丢的槽位 */
+function push<T>(channel: Channel<T>, value: T): void {
+  const capacity = channel.buffer.length;
+  if (channel.count >= capacity) {
+    channel.buffer[channel.read] = undefined;
+    channel.read = (channel.read + 1) % capacity;
+    channel.count -= 1;
+    channel.dropped += 1;
+  }
+  const write = (channel.read + channel.count) % capacity;
+  channel.buffer[write] = value;
+  channel.count += 1;
+}
+
+function take<T>(channel: Channel<T> | undefined): T | undefined {
+  if (channel === undefined || channel.count === 0) {
+    return undefined;
+  }
+  const capacity = channel.buffer.length;
+  const value = channel.buffer[channel.read];
+  channel.buffer[channel.read] = undefined;
+  channel.read = (channel.read + 1) % capacity;
+  channel.count -= 1;
+  return value;
 }
 
 function errorText(error: unknown): string {

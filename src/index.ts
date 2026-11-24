@@ -122,7 +122,7 @@ function createTargetKv(ctx: object, log: LogClient): KvLike | undefined {
 export const plugin = definePlugin({
   id: "chat-bridge",
   title: "聊天桥",
-  version: "0.1.23",
+  version: "0.1.24",
   license: "MIT",
   description: "采集 Minecraft 聊天与控制台消息，按可插拔平台分发，并支持平台消息回流游戏",
   resident: true,

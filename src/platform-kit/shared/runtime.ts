@@ -47,6 +47,20 @@ export async function abortableSleep(ms: number, ...signals: Array<AbortSignal |
 }
 
 /**
+ * 是不是 AbortSignal 引起的错误。
+ *
+ * 停止插件与请求超时都用 abort 打断 fetch，错误名分别是 `AbortError` 与
+ * `TimeoutError`。这类错误必须原样抛出，不能被平台包装成「网络错误 status 0」
+ * 再去重试：停止时重试只会拖住队列，超时重试又会再等满一个超时周期。
+ */
+export function isAbortError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return error.name === "AbortError" || error.name === "TimeoutError";
+}
+
+/**
  * 错误文案。
  *
  * `fetch`（undici）的网络错误只有一句 `fetch failed`，真正原因（ENOTFOUND /

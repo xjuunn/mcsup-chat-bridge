@@ -70,14 +70,32 @@ function bridgeOf(ctx: object): ChatBridge {
  *
  * 两者都会做控制字符清理，避免消息里的换行/制表符破坏命令行。
  */
+/**
+ * 读取可选能力。
+ *
+ * SDK 对「已声明但未授予」的成员挂的是抛 `denied` 的 getter，直接访问会让
+ * `onStart` 失败，文档承诺的降级分支根本走不到。优先问 `ctx.has`（新 SDK
+ * 不会触碰 getter）；旧 SDK 没有 `has` 时退回 try/catch。
+ */
+function capabilityOf<T>(ctx: object, name: string): T | undefined {
+  const probe = ctx as { has?: (capability: string) => boolean };
+  if (typeof probe.has === "function" && !probe.has(name)) {
+    return undefined;
+  }
+  try {
+    return (ctx as Record<string, T | undefined>)[name];
+  } catch {
+    return undefined;
+  }
+}
+
 function createGamePort(ctx: object, log: LogClient): GamePort | undefined {
-  const caps = ctx as RuntimeCapabilities;
-  const writer = caps["console:write"];
+  const writer = capabilityOf<RuntimeCapabilities["console:write"]>(ctx, "console:write");
   if (writer === undefined) {
     log.warn("未授予 console:write：平台 → 游戏方向不可用，桥将以仅出站模式运行");
     return undefined;
   }
-  const servers = caps["server:read"]?.servers;
+  const servers = capabilityOf<NonNullable<RuntimeCapabilities["server:read"]>>(ctx, "server:read")?.servers;
 
   return {
     async sendChat(server: string, text: string, mode: InjectMode = "say"): Promise<void> {
@@ -100,7 +118,14 @@ function createGamePort(ctx: object, log: LogClient): GamePort | undefined {
         const list = await servers.list();
         const running = list.find((item) => item.status === "running" || item.status === "starting");
         return running?.name ?? list[0]?.name ?? null;
-      } catch {
+      } catch (error) {
+        // 列表不可用时退回「不绑定服务器」，但必须说清原因：否则表现成
+        // 平台消息没人接收，排查时看不出是宿主没启动还是权限被收回。
+        log.warn(
+          `读取服务器列表失败，平台 → 游戏方向暂不绑定服务器：${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
         return null;
       }
     },
@@ -114,7 +139,7 @@ function createGamePort(ctx: object, log: LogClient): GamePort | undefined {
  * 并在日志里说明原因，免得用户以为持久化生效了。
  */
 function createTargetKv(ctx: object, log: LogClient): KvLike | undefined {
-  const kv = (ctx as RuntimeCapabilities)["storage:kv"];
+  const kv = capabilityOf<KvLike>(ctx, "storage:kv");
   if (kv === undefined) {
     log.warn("未授予 storage:kv：出站目标只在本次运行内有效（重启后需重新收到消息）");
   }

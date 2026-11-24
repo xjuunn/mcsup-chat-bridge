@@ -28,6 +28,8 @@
  */
 
 import { createHash } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 
 import WebSocket from "ws";
 
@@ -38,7 +40,7 @@ import type { MessageCategory, NormalizedMessage } from "../core/types.js";
 import { formatOutbound, formatRelay, splitText } from "../platform-kit/format.js";
 import { OutboundQueue, TargetBook, type OutboundTarget } from "../platform-kit/shared/outbound.js";
 import { MessageSeen } from "../platform-kit/shared/seen.js";
-import { abortableSleep, errorText, jitter, sleep } from "../platform-kit/shared/runtime.js";
+import { abortableSleep, errorText, isAbortError, jitter, sleep } from "../platform-kit/shared/runtime.js";
 import {
   boolOf,
   categoriesOf,
@@ -147,6 +149,11 @@ const AUTH_CODES = new Set([11241, 11243, 11244]);
 const RATE_LIMIT_CODE = 4008;
 const QUICK_DISCONNECT_THRESHOLD_MS = 5_000;
 const MAX_QUICK_DISCONNECTS = 3;
+
+/** READY/RESUMED 等待上限：网关建连后既没鉴权成功也没断开，说明握手卡住 */
+const READY_TIMEOUT_MS = 30_000;
+/** 心跳 ACK 缺失容忍：超过 2 个心跳周期没有 ACK 视为半开连接 */
+const HEARTBEAT_ACK_TIMEOUT_FACTOR = 2;
 
 /** WS 关闭码：致命错误直接停止重连 */
 const FATAL_CLOSE_CODES = new Map<number, string>([
@@ -462,6 +469,12 @@ export class QqPlatform implements ChatPlatform {
   private sessionId: string | undefined;
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   private heartbeatMs = 30_000;
+  /** 最近一次心跳发送 / ACK 的时间，用于判定半开连接 */
+  private lastHeartbeatAt = 0;
+  private lastAckAt = 0;
+  private readyTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 本适配器的停止信号：`stop()` 直接调用时也要能打断退避与请求 */
+  private readonly stopController = new AbortController();
   private connectAt = 0;
   private quickDisconnects = 0;
   private fatal: string | undefined;
@@ -534,6 +547,7 @@ export class QqPlatform implements ChatPlatform {
       "abort",
       () => {
         this.stopping = true;
+        this.stopController.abort();
         this.teardown("桥停止");
       },
       { once: true },
@@ -608,6 +622,7 @@ export class QqPlatform implements ChatPlatform {
 
   public async stop(reason: string): Promise<void> {
     this.stopping = true;
+    this.stopController.abort();
     this.teardown(reason);
     const loop = this.loop;
     if (loop !== undefined) {
@@ -649,7 +664,7 @@ export class QqPlatform implements ChatPlatform {
       if (closeCode === RATE_LIMIT_CODE) {
         // 4008：发送 payload 过快；官方建议等待后重连
         this.log.warn("[qq] 触发网关限流（4008），60 秒后重连");
-        await abortableSleep(60_000, this.ctx?.signal);
+        await abortableSleep(60_000, this.stopController.signal, this.ctx?.signal);
         continue;
       }
       if (closeCode !== undefined) {
@@ -690,7 +705,7 @@ export class QqPlatform implements ChatPlatform {
       this.attempts += 1;
       const wait = jitter(this.backoff);
       this.log.info(`[qq] ${Math.round(wait)} ms 后重连（第 ${this.attempts} 次）`);
-      await abortableSleep(wait, this.ctx?.signal);
+      await abortableSleep(wait, this.stopController.signal, this.ctx?.signal);
       this.backoff = Math.min(
         this.settings.reconnectMaxMs,
         Math.max(this.settings.reconnectMinMs, this.backoff * 2),
@@ -757,6 +772,16 @@ export class QqPlatform implements ChatPlatform {
     if (socket.readyState === WebSocket.CLOSED) {
       return;
     }
+    // 网关可能既不回 READY 也不断开：没有上限时这里会永远停在「已连接
+    // 但没鉴权」的状态，既不收消息也不触发重连。
+    this.readyTimer = setTimeout(() => {
+      if (this.ready || this.stopping) {
+        return;
+      }
+      this.log.warn(`[qq] 连接后 ${READY_TIMEOUT_MS / 1_000} 秒未收到 READY/RESUMED，重连`);
+      this.closeSocket(4_000, "ready timeout");
+    }, READY_TIMEOUT_MS);
+    this.readyTimer.unref?.();
     await new Promise<void>((resolve) => {
       this.resolveClosed = resolve;
       // 竞态兜底：注册回调前已经关闭
@@ -765,6 +790,14 @@ export class QqPlatform implements ChatPlatform {
       }
     });
     this.resolveClosed = undefined;
+    this.clearReadyTimer();
+  }
+
+  private clearReadyTimer(): void {
+    if (this.readyTimer !== undefined) {
+      clearTimeout(this.readyTimer);
+      this.readyTimer = undefined;
+    }
   }
 
   private onFrame(text: string): void {
@@ -821,6 +854,7 @@ export class QqPlatform implements ChatPlatform {
         return;
       }
       case 11:
+        this.lastAckAt = Date.now();
         return;
       default:
         this.log.debug?.(`[qq] 未处理的 op：${String(record["op"])}`);
@@ -943,10 +977,25 @@ export class QqPlatform implements ChatPlatform {
     if (socket === undefined) {
       return;
     }
+    this.lastHeartbeatAt = 0;
+    this.lastAckAt = 0;
     this.heartbeatTimer = setInterval(() => {
       if (socket.readyState !== WebSocket.OPEN) {
         return;
       }
+      const now = Date.now();
+      // 上一次心跳发出后一直没收到 op 11 ACK：TCP 可能还连着但应用层已经
+      // 死了，官方要求重连。只发不查会让连接静默挂掉直到服务端超时。
+      if (
+        this.lastHeartbeatAt > 0 &&
+        this.lastAckAt < this.lastHeartbeatAt &&
+        now - this.lastHeartbeatAt > this.heartbeatMs * HEARTBEAT_ACK_TIMEOUT_FACTOR
+      ) {
+        this.log.warn("[qq] 心跳超过 2 个周期未收到 ACK，判定连接失效");
+        socket.terminate();
+        return;
+      }
+      this.lastHeartbeatAt = now;
       try {
         socket.send(JSON.stringify({ op: 1, d: this.lastSeq }));
       } catch {
@@ -977,6 +1026,7 @@ export class QqPlatform implements ChatPlatform {
 
   private teardown(reason: string): void {
     this.stopHeartbeat();
+    this.clearReadyTimer();
     this.ready = false;
     this.outbound.clear();
     const socket = this.socket;
@@ -996,6 +1046,7 @@ export class QqPlatform implements ChatPlatform {
 
   private cleanupSocket(): void {
     this.stopHeartbeat();
+    this.clearReadyTimer();
     this.ready = false;
     const socket = this.socket;
     this.socket = undefined;
@@ -1339,20 +1390,8 @@ export class QqPlatform implements ChatPlatform {
     sourceUrl: string,
     maxPx: number = MEDIA_IMAGE_MAX_DISPLAY_PX,
   ): Promise<MediaImageRef> {
-    const response = await fetch(sourceUrl, {
-      signal: AbortSignal.timeout(this.settings.apiTimeoutMs),
-    });
-    if (!response.ok) {
-      throw new QqApiError(`下载源图片失败 [${response.status}]：${sourceUrl.slice(0, 120)}`, response.status);
-    }
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.byteLength === 0) {
-      throw new Error("源图片为空");
-    }
-    if (bytes.byteLength > MEDIA_IMAGE_MAX_BYTES) {
-      throw new Error(`源图片超过 10MB（${bytes.byteLength} 字节）`);
-    }
-    const contentType = imageContentTypeOf(response.headers.get("content-type"), sourceUrl);
+    const { bytes, contentType: rawContentType } = await this.downloadImage(sourceUrl);
+    const contentType = imageContentTypeOf(rawContentType, sourceUrl);
     const md5 = createHash("md5").update(bytes).digest("hex");
     const sha1 = createHash("sha1").update(bytes).digest("hex");
 
@@ -1390,7 +1429,7 @@ export class QqPlatform implements ChatPlatform {
       method: "PUT",
       headers: { "Content-Type": contentType },
       body: bytes,
-      signal: AbortSignal.timeout(this.settings.apiTimeoutMs),
+      signal: this.requestSignal(this.settings.apiTimeoutMs),
     });
     if (!put.ok) {
       throw new QqApiError(`素材直传失败 [${put.status}]`, put.status);
@@ -1460,9 +1499,13 @@ export class QqPlatform implements ChatPlatform {
     const { fileInfo } = options;
     const useMarkdown = options.markdown ?? this.settings.markdown;
 
+    let passive = this.takePassive(key);
+    // 序号与被动回复句柄在重试之间保持不变：一次逻辑发送只消耗一次被动
+    // 额度；平台报 DEDUPE 时再换一个不冲突的序号重发。
+    let seq = this.nextSeq(key);
+
     for (let attempt = 1; attempt <= SEND_ATTEMPTS; attempt += 1) {
       await this.pace();
-      const passive = this.takePassive(key);
       const payload: Record<string, unknown> =
         fileInfo !== undefined
           ? {
@@ -1474,7 +1517,7 @@ export class QqPlatform implements ChatPlatform {
             ? { msg_type: 2, markdown: { content: text } }
             : { msg_type: 0, content: text };
       const body: Record<string, unknown> = {
-        msg_seq: this.nextSeq(key),
+        msg_seq: seq,
         ...payload,
         ...(passive === undefined ? {} : { msg_id: passive.messageId }),
       };
@@ -1491,22 +1534,26 @@ export class QqPlatform implements ChatPlatform {
         );
         return;
       } catch (error) {
+        if (isAbortError(error)) {
+          throw error;
+        }
         if (!(error instanceof QqApiError)) {
           if (attempt < SEND_ATTEMPTS) {
-            await abortableSleep(300 * attempt, this.ctx?.signal);
+            await abortableSleep(300 * attempt, this.stopController.signal, this.ctx?.signal);
             continue;
           }
           throw error;
         }
         if (passive !== undefined && PASSIVE_EXPIRED_CODES.has(error.code ?? -1)) {
-          // 被动回复窗口过期/次数超限：改为主动消息再试一次
+          // 被动回复窗口过期/次数超限：改为主动消息再试一次（不消耗重试次数）
           this.passive.delete(key);
+          passive = undefined;
           this.log.info(`[qq] ${key} 被动回复已失效，降级为主动消息`);
           attempt -= 1;
           continue;
         }
         if (error.code === DEDUPE_CODE) {
-          this.bumpSeq(key);
+          seq = this.bumpSeq(key);
           if (attempt < SEND_ATTEMPTS) {
             continue;
           }
@@ -1516,7 +1563,7 @@ export class QqPlatform implements ChatPlatform {
         if (!retryable || attempt === SEND_ATTEMPTS) {
           throw error;
         }
-        await abortableSleep(Math.min(5_000, 400 * attempt), this.ctx?.signal);
+        await abortableSleep(Math.min(5_000, 400 * attempt), this.stopController.signal, this.ctx?.signal);
       }
     }
   }
@@ -1528,7 +1575,7 @@ export class QqPlatform implements ChatPlatform {
     }
     const wait = this.settings.sendIntervalMs - (Date.now() - this.lastSendAt);
     if (wait > 0) {
-      await abortableSleep(wait, this.ctx?.signal);
+      await abortableSleep(wait, this.stopController.signal, this.ctx?.signal);
     }
     this.lastSendAt = Date.now();
   }
@@ -1559,9 +1606,9 @@ export class QqPlatform implements ChatPlatform {
     return current;
   }
 
-  /** 平台报告 msg_id+msg_seq 重复时，跳过冲突的序号再发 */
-  private bumpSeq(key: string): void {
-    void this.nextSeq(key);
+  /** 平台报告 msg_id+msg_seq 重复时，跳过冲突的序号再发；返回新序号 */
+  private bumpSeq(key: string): number {
+    return this.nextSeq(key);
   }
 
   // -------------------------------------------------------------------------
@@ -1623,7 +1670,7 @@ export class QqPlatform implements ChatPlatform {
           "User-Agent": USER_AGENT,
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(this.settings.apiTimeoutMs),
+        signal: this.requestSignal(this.settings.apiTimeoutMs),
       });
     };
 
@@ -1635,6 +1682,10 @@ export class QqPlatform implements ChatPlatform {
         response = await attempt();
       }
     } catch (error) {
+      // abort 来自停止或本次请求超时：原样抛出，不能被包装成 status 0 再重试
+      if (isAbortError(error)) {
+        throw error;
+      }
       throw new QqApiError(`QQ API 网络错误（${path}）：${errorText(error)}`, 0);
     }
 
@@ -1681,7 +1732,7 @@ export class QqPlatform implements ChatPlatform {
         "User-Agent": USER_AGENT,
         ...(init.headers ?? {}),
       },
-      signal: AbortSignal.timeout(this.settings.apiTimeoutMs),
+      signal: this.requestSignal(this.settings.apiTimeoutMs),
     });
     const text = await response.text().catch(() => "");
     if (!response.ok) {
@@ -1695,7 +1746,94 @@ export class QqPlatform implements ChatPlatform {
     }
   }
 
+  /** 把本适配器停止信号、ctx 停止信号与超时组合成一个 AbortSignal */
+  private requestSignal(timeoutMs: number): AbortSignal {
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort();
+    }, timeoutMs);
+    timer.unref?.();
+    const sources: AbortSignal[] = [this.stopController.signal];
+    const ctxSignal = this.ctx?.signal;
+    if (ctxSignal !== undefined) {
+      sources.push(ctxSignal);
+    }
+    const cleanups: Array<() => void> = [];
+    controller.signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        for (const cleanup of cleanups) {
+          cleanup();
+        }
+      },
+      { once: true },
+    );
+    for (const source of sources) {
+      if (source.aborted) {
+        controller.abort();
+        break;
+      }
+      const onAbort = (): void => {
+        controller.abort();
+      };
+      source.addEventListener("abort", onAbort, { once: true });
+      cleanups.push(() => {
+        source.removeEventListener("abort", onAbort);
+      });
+    }
+    return controller.signal;
   }
+
+  /**
+   * 下载入站图片。
+   *
+   * 图片 URL 来自 QQ 消息附件，属于外部输入：只允许 http(s)，逐跳校验重定向
+   * 目标，并且拒绝回环 / 内网 / 链路本地地址，避免把宿主当作访问内网的跳板。
+   * 读取按流累计，超过上限立即中断，不能先 `arrayBuffer()` 再检查大小。
+   */
+  private async downloadImage(sourceUrl: string): Promise<{
+    readonly bytes: Uint8Array;
+    readonly contentType: string | null;
+  }> {
+    const trusted = trustedOriginsOf(this.settings.apiBase);
+    let url = await assertPublicHttpUrl(sourceUrl, trusted);
+    let response: Response | undefined;
+    for (let hop = 0; hop <= 3; hop += 1) {
+      response = await fetch(url, {
+        redirect: "manual",
+        signal: this.requestSignal(this.settings.apiTimeoutMs),
+      });
+      if (response.status < 300 || response.status >= 400) {
+        break;
+      }
+      const location = response.headers.get("location");
+      if (location === null) {
+        throw new QqApiError(`图片重定向缺少 Location [${response.status}]`, response.status);
+      }
+      url = await assertPublicHttpUrl(new URL(location, url).toString(), trusted);
+      response = undefined;
+    }
+    if (response === undefined) {
+      throw new Error("图片地址重定向次数过多");
+    }
+    if (!response.ok) {
+      throw new QqApiError(
+        `下载源图片失败 [${response.status}]：${sourceUrl.slice(0, 120)}`,
+        response.status,
+      );
+    }
+    const declared = Number(response.headers.get("content-length") ?? Number.NaN);
+    if (Number.isFinite(declared) && declared > MEDIA_IMAGE_MAX_BYTES) {
+      throw new Error(`源图片超过 10MB（声明 ${declared} 字节）`);
+    }
+    const bytes = await readBodyCapped(response, MEDIA_IMAGE_MAX_BYTES);
+    if (bytes.byteLength === 0) {
+      throw new Error("源图片为空");
+    }
+    return { bytes, contentType: response.headers.get("content-type") };
+  }
+}
 
 export const qqPlatformFactory: PlatformFactory = {
   id: "qq",
@@ -1829,5 +1967,160 @@ function imageContentTypeOf(value: string | null, url: string): MarkdownImageTyp
     return "image/webp";
   }
   return "image/jpeg";
+}
+
+/** 解析 apiBase 的源站；配置非法时不豁免任何地址 */
+function trustedOriginsOf(apiBase: string): ReadonlySet<string> {
+  try {
+    return new Set([new URL(apiBase).origin]);
+  } catch {
+    return new Set<string>();
+  }
+}
+
+/**
+ * 入站图片地址校验：只允许公网 http(s)。
+ *
+ * QQ 消息里的图片 URL 是外部输入。不限制的话，一个指向 `http://127.0.0.1`
+ * 或云元数据地址的「图片」就会被插件下载并转存，等于给了远端一个内网探测器。
+ * 域名在这里解析一次并检查所有地址；字面量 IP 直接检查。
+ *
+ * `trustedOrigins` 是用户自己配置的 API 基址同源地址（自建网关 / 本地代理）：
+ * 那一侧地址由用户显式指定，不算外部输入，跳过内网判定。
+ */
+async function assertPublicHttpUrl(
+  raw: string,
+  trustedOrigins: ReadonlySet<string> = new Set<string>(),
+): Promise<URL> {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`图片地址不是合法 URL：${raw.slice(0, 120)}`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`图片地址协议不允许：${url.protocol}`);
+  }
+  if (url.username !== "" || url.password !== "") {
+    throw new Error("图片地址不允许携带凭据");
+  }
+  if (trustedOrigins.has(url.origin)) {
+    return url;
+  }
+  const host = url.hostname.replace(/^\[|\]$/gu, "").toLowerCase();
+  if (host === "") {
+    throw new Error("图片地址缺少主机名");
+  }
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) {
+    throw new Error(`图片地址指向内网主机：${host}`);
+  }
+  if (isIP(host) !== 0) {
+    if (ipIsPrivate(host)) {
+      throw new Error(`图片地址指向内网地址：${host}`);
+    }
+    return url;
+  }
+  let addresses;
+  try {
+    addresses = await lookup(host, { all: true, verbatim: true });
+  } catch (error) {
+    throw new Error(`图片主机名解析失败：${host}（${errorText(error)}）`);
+  }
+  if (addresses.length === 0) {
+    throw new Error(`图片主机名没有解析结果：${host}`);
+  }
+  for (const entry of addresses) {
+    if (ipIsPrivate(entry.address)) {
+      throw new Error(`图片地址解析到内网地址：${host} → ${entry.address}`);
+    }
+  }
+  return url;
+}
+
+/** 回环 / 内网 / 链路本地 / 保留地址一律视为不可访问 */
+function ipIsPrivate(address: string): boolean {
+  const family = isIP(address);
+  if (family === 4) {
+    const parts = address.split(".").map((part) => Number(part));
+    const [a = 0, b = 0] = parts;
+    if (a === 10 || a === 127 || a === 0) {
+      return true;
+    }
+    if (a === 172 && b >= 16 && b <= 31) {
+      return true;
+    }
+    if (a === 192 && b === 168) {
+      return true;
+    }
+    if (a === 169 && b === 254) {
+      return true;
+    }
+    if (a === 100 && b >= 64 && b <= 127) {
+      return true;
+    }
+    if (a === 198 && (b === 18 || b === 19)) {
+      return true;
+    }
+    return a >= 224;
+  }
+  if (family === 6) {
+    const lower = address.toLowerCase();
+    if (lower === "::1" || lower === "::") {
+      return true;
+    }
+    if (lower.startsWith("fc") || lower.startsWith("fd")) {
+      return true;
+    }
+    if (/^fe[89ab]/u.test(lower) || lower.startsWith("ff")) {
+      return true;
+    }
+    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/iu.exec(address);
+    if (mapped?.[1] !== undefined) {
+      return ipIsPrivate(mapped[1]);
+    }
+    return false;
+  }
+  return true;
+}
+
+/** 流式读取响应体，超过上限立即中断；避免先整包读入再检查大小 */
+async function readBodyCapped(response: Response, max: number): Promise<Uint8Array> {
+  const body = response.body;
+  if (body === null) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength > max) {
+      throw new Error(`源图片超过 ${Math.floor(max / 1024 / 1024)}MB`);
+    }
+    return bytes;
+  }
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (value === undefined) {
+        continue;
+      }
+      total += value.byteLength;
+      if (total > max) {
+        await reader.cancel().catch(() => {});
+        throw new Error(`源图片超过 ${Math.floor(max / 1024 / 1024)}MB`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
 }
 

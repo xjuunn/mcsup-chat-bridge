@@ -473,9 +473,13 @@ describe("Discord 出站", () => {
     await waitFor(() => inbound.length === 2, "两条入站");
 
     run.platform.deliver(message({ text: "从游戏来" }));
-    await waitFor(() => fake.sends.length >= 2, "发给学到的两个目标");
-    const channels = new Set(fake.sends.map((sent) => sent.channelId));
-    expect([...channels].sort()).toEqual(["200", "dm-42"]);
+    const sentChannels = (): Set<string> => new Set(fake.sends.map((sent) => sent.channelId));
+    // 入站镜像也会占用 `sends`，所以要等两个目标都出现，而不是等条数
+    await waitFor(
+      () => sentChannels().has("200") && sentChannels().has("dm-42"),
+      "发给学到的两个目标",
+    );
+    expect([...sentChannels()].sort()).toEqual(["200", "dm-42"]);
     // 学到的私聊已经是 DM channel id，不应再调 /users/@me/channels
     expect(fake.dmCreates).toHaveLength(0);
   });

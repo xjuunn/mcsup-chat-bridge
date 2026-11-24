@@ -196,7 +196,16 @@ export class OutboundQueue<P extends QueueItem, R = undefined> {
           continue;
         }
 
-        const prepared = prepare === undefined ? undefined : await prepare(pending);
+        let prepared: R | undefined;
+        if (prepare !== undefined) {
+          try {
+            prepared = await prepare(pending);
+          } catch (error) {
+            // 准备失败（如 QQ 图片转存）按整条消息跳过，但不阻塞队列后续消息
+            log.warn(`[${label}] 发送前准备失败（${pending.id}）：${errorText(error)}`);
+            continue;
+          }
+        }
         let failures = 0;
         for (const target of selected) {
           try {
@@ -207,7 +216,12 @@ export class OutboundQueue<P extends QueueItem, R = undefined> {
           }
         }
         if (failures === selected.length) {
-          throw new Error(`${this.options.title} 所有目标均发送失败（${pending.id}）`);
+          // 一条消息全目标失败不能中断整个队列：后面的消息仍要发，
+          // 否则一次平台故障会把积压永久卡在队首。
+          log.warn(
+            `[${label}] ${this.options.title} 所有目标均发送失败（${pending.id}），继续发送后续消息`,
+          );
+          continue;
         }
         if (failures > 0) {
           log.warn(`[${label}] 消息 ${pending.id} 有 ${failures}/${selected.length} 个目标失败`);

@@ -29,7 +29,7 @@
 
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { qrTerminal } from "./lib/qr.mjs";
 
@@ -53,13 +53,17 @@ const options = {
   open: args.includes("--open"),
   emitToken: args.includes("--emit-token"),
   tokenFile: readOption("--token-file") ?? process.env.MCSUP_SETUP_SECRET_FILE,
+  // 安装向导的宿主可以接管排版：插件只写界面事件，二维码由宿主居中渲染
+  uiFile: readOption("--ui-file") ?? process.env.MCSUP_SETUP_UI_FILE,
+  // 新宿主列出本次允许回填的路径；缺省时保持单字符串协议
+  setupFields: readSetupFields(process.env.MCSUP_SETUP_FIELDS),
   apiBase: readOption("--api-base") ?? DEFAULT_API_BASE,
 };
 
 if (args.includes("--help") || args.includes("-h")) {
   process.stdout.write(
     [
-      "用法：node scripts/weixin-login.mjs [--apply] [--verify-pin] [--plain] [--open] [--emit-token --token-file=路径] [--api-base=URL]",
+      "用法：node scripts/weixin-login.mjs [--apply] [--verify-pin] [--plain] [--open] [--emit-token --token-file=路径] [--ui-file=路径] [--api-base=URL]",
       "",
       "  --apply       登录后写入 chat-bridge 配置并重启插件",
       "  --verify-pin  要求输入手机微信显示的数字（PIN）",
@@ -67,7 +71,11 @@ if (args.includes("--help") || args.includes("-h")) {
       "  --open        额外在浏览器打开二维码链接",
       "  --emit-token  不打印 token，写入 --token-file 指定的文件（安装向导使用）",
       "  --token-file  配合 --emit-token 的文件路径，权限 0600",
+      "  --ui-file     把二维码 / 状态写成 JSON 事件交给宿主排版（默认取 MCSUP_SETUP_UI_FILE）",
       "  --api-base    覆盖 iLink 基址（默认 https://ilinkai.weixin.qq.com）",
+      "",
+      "环境变量（安装向导设置）：MCSUP_SETUP_FIELDS 为允许回填的配置路径 JSON 数组；",
+      "设置后密钥文件写成对象（如 weixin.botToken + weixin.apiBase），否则只写 token。",
       ""
     ].join("\n"),
   );
@@ -80,6 +88,53 @@ if (options.verifyPin) {
 
 if (options.emitToken && (options.tokenFile === undefined || options.tokenFile.trim() === "")) {
   fail("--emit-token 需要 --token-file 或 MCSUP_SETUP_SECRET_FILE；token 不会打印到终端");
+}
+
+// ---------------------------------------------------------------------------
+// 安装向导的界面文件：插件只描述要显示什么，排版由宿主负责
+// ---------------------------------------------------------------------------
+
+/** 追加一条 UI 事件；未设置 UI 文件或写入失败时返回 false，由调用方回退到 stdout */
+function emitUi(event) {
+  const file = options.uiFile?.trim();
+  if (file === undefined || file === "") {
+    return false;
+  }
+  try {
+    appendFileSync(file, `${JSON.stringify(event)}\n`, { encoding: "utf8" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 状态行：有 UI 文件时交给宿主，否则直接写终端 */
+function say(text) {
+  if (!emitUi({ type: "status", text })) {
+    process.stdout.write(`${text}\n`);
+  }
+}
+
+/** 读取宿主允许回填的路径；非法或缺失时退回旧版单字符串协议 */
+function readSetupFields(raw) {
+  const text = raw?.trim();
+  if (text === undefined || text === "") {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(text);
+    if (
+      Array.isArray(parsed) &&
+      parsed.length > 0 &&
+      parsed.every((item) => typeof item === "string")
+    ) {
+      return parsed;
+    }
+  } catch {
+    // 落到下面的警告
+  }
+  process.stderr.write("[login] 忽略非法的 MCSUP_SETUP_FIELDS，按旧版单字段协议继续\n");
+  return undefined;
 }
 
 const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -113,7 +168,7 @@ try {
 
     if (name === "scaned") {
       pendingVerifyCode = undefined;
-      process.stdout.write("已扫码，等待手机确认…\n");
+      say("已扫码，等待手机确认…");
       continue;
     }
 
@@ -121,9 +176,9 @@ try {
       const host = typeof status.redirect_host === "string" ? status.redirect_host.trim() : "";
       if (host !== "") {
         currentBaseUrl = `https://${host}`;
-        process.stdout.write(`服务端要求切换到 ${currentBaseUrl}，继续轮询…\n`);
+        say(`服务端要求切换到 ${currentBaseUrl}，继续轮询…`);
       } else {
-        process.stdout.write("服务端要求切换区域，但没有给出主机名；继续使用当前地址\n");
+        say("服务端要求切换区域，但没有给出主机名；继续使用当前地址");
       }
       continue;
     }
@@ -133,7 +188,7 @@ try {
       if (qrRefreshCount > MAX_REFRESH) {
         fail(`二维码连续失效 ${MAX_REFRESH} 次，请稍后重试`);
       }
-      process.stdout.write(`二维码已过期，正在刷新（${qrRefreshCount}/${MAX_REFRESH}）…\n`);
+      say(`二维码已过期，正在刷新（${qrRefreshCount}/${MAX_REFRESH}）…`);
       pendingVerifyCode = undefined;
       qr = await fetchQRCode();
       printQr(qr);
@@ -146,7 +201,7 @@ try {
       if (qrRefreshCount > MAX_REFRESH) {
         fail("PIN 连续错误，登录已停止；请稍后再试");
       }
-      process.stdout.write(`PIN 输入错误过多，刷新二维码（${qrRefreshCount}/${MAX_REFRESH}）…\n`);
+      say(`PIN 输入错误过多，刷新二维码（${qrRefreshCount}/${MAX_REFRESH}）…`);
       qr = await fetchQRCode();
       printQr(qr);
       continue;
@@ -181,7 +236,10 @@ try {
       if (options.emitToken) {
         try {
           // 安装向导模式：token 只落进宿主指定的临时文件，不回显
-          writeFileSync(options.tokenFile.trim(), token, { mode: 0o600, encoding: "utf8" });
+          writeFileSync(options.tokenFile.trim(), buildSetupPayload(token, status.baseurl), {
+            mode: 0o600,
+            encoding: "utf8",
+          });
         } catch (error) {
           fail(
             `写入 token 文件失败：${error instanceof Error ? error.message : String(error)}`,
@@ -207,7 +265,7 @@ try {
       process.exit(0);
     }
 
-    process.stdout.write(`未识别的登录状态 ${name}，继续轮询…\n`);
+    say(`未识别的登录状态 ${name}，继续轮询…`);
   }
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
@@ -320,13 +378,22 @@ async function request(url, init) {
 // ---------------------------------------------------------------------------
 
 function printQr(qr) {
-  process.stdout.write("\n用手机微信扫描下面的二维码：\n");
   if (qr.content === "") {
-    process.stdout.write("（服务端没有返回二维码内容；请重试或检查 apiBase）\n");
-    process.stdout.write("\n等待扫码…\n");
+    say("服务端没有返回二维码内容；请重试或检查 apiBase");
+    say("等待扫码…");
     return;
   }
 
+  // 新宿主接管排版：只交出内容，二维码由宿主按终端宽度居中渲染
+  if (emitUi({ type: "qr", content: qr.content, label: "用手机微信扫描下面的二维码" })) {
+    if (options.open) {
+      openUrl(qr.content);
+    }
+    say("等待扫码…");
+    return;
+  }
+
+  process.stdout.write("\n用手机微信扫描下面的二维码：\n");
   if (!options.plain) {
     try {
       process.stdout.write(`\n${qrTerminal(qr.content)}\n\n`);
@@ -342,6 +409,29 @@ function printQr(qr) {
     openUrl(qr.content);
   }
   process.stdout.write("\n等待扫码…\n");
+}
+
+/**
+ * 安装向导回传内容
+ *
+ * 新宿主经 `MCSUP_SETUP_FIELDS` 声明允许回填的路径：登录一次可以同时写
+ * `weixin.botToken` 与服务端建议的 `weixin.apiBase`，避免向导再问一遍基址。
+ * 旧宿主不设置该变量，只写单个 token 字符串。基线地址等于默认值时省略，
+ * 让配置保持干净。
+ */
+function buildSetupPayload(token, suggestedBaseUrl) {
+  const allowed = options.setupFields;
+  if (allowed === undefined) {
+    return token;
+  }
+  const values = { "weixin.botToken": token };
+  const base =
+    typeof suggestedBaseUrl === "string" ? suggestedBaseUrl.trim().replace(/\/+$/, "") : "";
+  const fallback = DEFAULT_API_BASE.replace(/\/+$/, "");
+  if (base !== "" && base !== fallback && allowed.includes("weixin.apiBase")) {
+    values["weixin.apiBase"] = base;
+  }
+  return JSON.stringify(values);
 }
 
 function openUrl(url) {

@@ -64,9 +64,10 @@ mcsup plugin install --from .\build
      才会问 Discord Bot Token，选了 `weixin` 才会问微信 Bot Token，没选的平台一个都不问
      （`setup.fields[].when`，需要支持 descriptor schema 4 的宿主）；被问到时都是必填，
      留空会提示后重新提问。微信 token 不能从后台复制：宿主支持 descriptor schema 5 时
-     **安装向导会直接拉起插件在终端显示二维码**（`setup.fields[].interactive`），扫码后
-     token 经 0600 临时文件回传，不用手工复制；旧宿主会退回手工输入，可先运行
-     `node scripts/weixin-login.mjs` 扫码再粘贴；
+     **安装向导会直接拉起插件完成扫码**（`setup.fields[].interactive`），二维码经
+     `MCSUP_SETUP_UI_FILE` 交给宿主按终端宽度居中渲染；扫码后 token（以及服务端建议的
+     `weixin.apiBase`）经 0600 临时文件一次回传，不用手工复制，也不再重复问基址。旧宿主
+     会退回单 token 回传与插件自绘二维码，可先运行 `node scripts/weixin-login.mjs` 扫码再粘贴；
    - 输入框**不会预填旧值**：留空即沿用，密钥每输入一个字符显示一个 `*`；
    - 必填项没有旧值可沿用时不能回车跳过，会提示后重新提问（`Ctrl+C` 取消）；
 3. 群 / 私聊 id **不用填**：留空即全部（入站不限会话，出站发给收到过消息的
@@ -114,11 +115,11 @@ src/
   events/normalize.ts       宿主事件校验（zod）与归一化
   config.ts                 配置 schema（含 QQ / Telegram / Discord / 微信与密钥字段）、resolveConfig
   ops/index.ts              messages（table + 分页）与 status（detail，含入站统计）
-  setup/weixin.ts           微信 Bot Token 的交互式安装字段（拉起扫码脚本，token 经临时文件回传）
+  setup/weixin.ts           微信 Bot Token 的交互式安装字段（拉起扫码脚本，token / iLink 基址经临时文件回传）
   index.ts                  definePlugin 接线、能力声明、GamePort（say / tellraw）
 scripts/
   ensure-sdk.mjs            SDK 缺失或过期（mtime）时自动构建
-  weixin-login.mjs          微信扫码登录：终端显示二维码，取得 bot token，可 --apply 写入配置
+  weixin-login.mjs          微信扫码登录：终端显示二维码（或经 UI 文件交给宿主排版），取得 bot token，可 --apply 写入配置
   bundle-setup.mjs          构建后把扫码脚本与 lib/qr.mjs 复制进 build/setup/
   lib/qr.mjs                零依赖二维码编码与终端渲染（Byte 模式、等级 L）
   real-host-check.mjs       真实子进程 + 真实 TCP 假宿主 + 真实 QQ 官方协议（REST + Gateway）

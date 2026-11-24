@@ -139,6 +139,15 @@ const SEEN_TTL_MS = 10 * 60_000;
  */
 const CHAT_MIRROR_TTL_MS = 3_000;
 
+/**
+ * 跨平台转发的文本上限。
+ *
+ * 入站注入受 `inboundMaxLength` 限制（游戏内一行不能太长），但平台之间转发
+ * 不该跟着截：Telegram / Discord 的单条上限远高于游戏注入，用同一个值会把
+ * 长消息悄悄砍掉半截。
+ */
+const RELAY_MAX_LENGTH = 4_096;
+
 export class ChatBridge {
   private readonly log: LogClient;
   private readonly registry: PlatformRegistry;
@@ -174,6 +183,8 @@ export class ChatBridge {
   private readonly projectedChat = new Map<string, number>();
   /** 跨平台转发是否可用的告警只打一次 */
   private crossWarned = false;
+  /** 生命周期串行化：start / applyConfig / stop 不能交错执行 */
+  private lifecycle: Promise<void> = Promise.resolve();
 
   public constructor(options: BridgeOptions) {
     this.log = options.log;
@@ -192,7 +203,11 @@ export class ChatBridge {
     return this.config;
   }
 
-  public async start(): Promise<void> {
+  public start(): Promise<void> {
+    return this.serialize(() => this.startLocked());
+  }
+
+  private async startLocked(): Promise<void> {
     if (this.started) {
       return;
     }
@@ -213,7 +228,11 @@ export class ChatBridge {
    * 平台集合或平台配置变化时先起新平台，成功后再停旧平台；新平台启动失败
    * 会抛出，宿主据此回滚配置，旧平台继续服务。
    */
-  public async applyConfig(config: BridgeConfig): Promise<void> {
+  public applyConfig(config: BridgeConfig): Promise<void> {
+    return this.serialize(() => this.applyConfigLocked(config));
+  }
+
+  private async applyConfigLocked(config: BridgeConfig): Promise<void> {
     if (!this.started) {
       this.config = config;
       this.store.resize(config.storeSize);
@@ -227,6 +246,12 @@ export class ChatBridge {
 
     const next = this.buildDispatcher(config);
     await next.start();
+    // 启动期间可能已经 `stop`：串行化保证这里不会被 stop 插入，但 stop 排队
+    // 之后仍要避免把新 dispatcher 登记到已停用的桥里。
+    if (!this.started) {
+      await next.stop("已停机");
+      return;
+    }
     const previous = this.dispatcher;
     this.dispatcher = next;
     this.config = config;
@@ -241,7 +266,11 @@ export class ChatBridge {
     }
   }
 
-  public async stop(reason: string): Promise<void> {
+  public stop(reason: string): Promise<void> {
+    return this.serialize(() => this.stopLocked(reason));
+  }
+
+  private async stopLocked(reason: string): Promise<void> {
     if (!this.started) {
       return;
     }
@@ -252,6 +281,16 @@ export class ChatBridge {
     if (dispatcher !== undefined) {
       await dispatcher.stop(reason);
     }
+  }
+
+  /** 串行执行生命周期变更；一个失败不阻塞后续操作 */
+  private serialize(task: () => Promise<void>): Promise<void> {
+    const run = this.lifecycle.then(task, task);
+    this.lifecycle = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   /**
@@ -331,7 +370,9 @@ export class ChatBridge {
     }
 
     if (this.config.crossPlatform) {
-      this.relayInbound(message, text);
+      // 转发用独立上限：游戏注入的 `inboundMaxLength` 通常只有一两百字符，
+      // 拿它截断会把发往 Telegram / Discord 的长消息砍掉。
+      this.relayInbound(message, clampText(message.text, RELAY_MAX_LENGTH));
     }
 
     if (!inject) {

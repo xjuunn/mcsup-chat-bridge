@@ -62,6 +62,8 @@ export class LearnedTargets {
   private readonly userList: string[] = [];
   private loadWarned = false;
   private saveWarned = false;
+  /** 落盘串行链：并发写会让旧快照覆盖新快照 */
+  private persistChain: Promise<void> = Promise.resolve();
 
   public constructor(options: LearnedTargetsOptions) {
     this.key = options.key;
@@ -154,7 +156,17 @@ export class LearnedTargets {
     return true;
   }
 
-  private async persist(): Promise<void> {
+  private persist(): Promise<void> {
+    // 串行化：两条消息几乎同时新增会话时，两个 `kv.set` 并发完成顺序不定，
+    // 后完成的旧快照会覆盖刚写入的新快照。排队写的是「执行时」的最新状态。
+    this.persistChain = this.persistChain.then(
+      () => this.write(),
+      () => this.write(),
+    );
+    return this.persistChain;
+  }
+
+  private async write(): Promise<void> {
     if (this.kv === undefined) {
       return;
     }

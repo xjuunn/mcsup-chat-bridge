@@ -854,6 +854,30 @@ describe("QQ 适配器（假官方 Gateway + REST）", () => {
     expect(fake.mediaDeletes).toHaveLength(0);
   });
 
+  it("拒绝下载指向内网的图片地址，退回富媒体且不发起请求", async () => {
+    const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
+    cleanup.push(() => fake.close());
+    const inbound: PlatformInboundMessage[] = [];
+    startPlatform(fake, { groups: ["g1"], allowPrivate: true, privateUsers: ["u1"] }, inbound);
+    await fake.ready();
+
+    // 只有 http 来源且公网可达才允许下载；回环地址必须在外层就拦住
+    fake.dispatch("GROUP_AT_MESSAGE_CREATE", {
+      id: "g-img-ssrf",
+      group_openid: "g1",
+      content: "看图",
+      attachments: [{ content_type: "image/png", url: "http://127.0.0.1:9/a.png" }],
+      author: { member_openid: "u1", member_nickname: "小A" },
+    });
+    await waitFor(() => inbound.length === 1, "群图片入站");
+    await waitFor(() => fake.files.length === 1 && fake.posts.length >= 2, "退回富媒体");
+
+    expect(fake.imageFetches()).toBe(0);
+    expect(fake.mediaPrepares).toHaveLength(0);
+    expect(fake.posts[0]?.body).toMatchObject({ msg_type: 0, content: "[群] 小A: 看图" });
+    expect(fake.posts[1]?.body).toMatchObject({ msg_type: 7, media: { file_info: "fi-1" } });
+  });
+
   it("素材库满额时清理旧图后重试", async () => {
     const fake = await startFakeQq({ appId: "app-1", clientSecret: "secret-1" });
     cleanup.push(() => fake.close());

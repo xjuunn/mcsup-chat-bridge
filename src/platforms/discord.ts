@@ -32,7 +32,7 @@ import type { MessageCategory, NormalizedMessage } from "../core/types.js";
 import { formatOutbound, formatRelay, splitText } from "../platform-kit/format.js";
 import { OutboundQueue, TargetBook, type OutboundTarget } from "../platform-kit/shared/outbound.js";
 import { MessageSeen } from "../platform-kit/shared/seen.js";
-import { abortableSleep, errorText, jitter, sleep } from "../platform-kit/shared/runtime.js";
+import { abortableSleep, errorText, isAbortError, jitter, sleep } from "../platform-kit/shared/runtime.js";
 import {
   boolOf,
   categoriesOf,
@@ -1091,6 +1091,9 @@ export class DiscordPlatform implements ChatPlatform {
         this.log.debug?.(`[discord] 已发送到频道 ${channelId}：${previewOf(payload)}`);
         return;
       } catch (error) {
+        if (isAbortError(error)) {
+          throw error;
+        }
         if (!(error instanceof DiscordApiError)) {
           if (attempt < SEND_ATTEMPTS) {
             await abortableSleep(300 * attempt, this.stopController.signal, this.ctx?.signal);
@@ -1145,6 +1148,10 @@ export class DiscordPlatform implements ChatPlatform {
         signal: this.requestSignal(timeoutMs),
       });
     } catch (error) {
+      // abort 来自停止或本次请求超时：原样抛出，不能让重试逻辑把它当成网络故障
+      if (isAbortError(error)) {
+        throw error;
+      }
       throw new DiscordApiError(`Discord ${method} ${route} 网络错误：${errorText(error)}`, 0);
     }
 

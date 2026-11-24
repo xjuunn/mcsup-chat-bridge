@@ -38,7 +38,7 @@ import type { MessageCategory, NormalizedMessage } from "../core/types.js";
 import { formatOutbound, formatRelay, splitText } from "../platform-kit/format.js";
 import { OutboundQueue, TargetBook, type OutboundTarget, type QueueItem } from "../platform-kit/shared/outbound.js";
 import { MessageSeen } from "../platform-kit/shared/seen.js";
-import { abortableSleep, errorText, jitter, sleep } from "../platform-kit/shared/runtime.js";
+import { abortableSleep, errorText, isAbortError, jitter, sleep } from "../platform-kit/shared/runtime.js";
 import {
   boolOf,
   categoriesOf,
@@ -943,10 +943,11 @@ export class WeixinPlatform implements ChatPlatform {
           continue;
         }
         const retryable =
-          !(error instanceof WeixinApiError) ||
-          error.status === 0 ||
-          error.status === 429 ||
-          error.status >= 500;
+          !isAbortError(error) &&
+          (!(error instanceof WeixinApiError) ||
+            error.status === 0 ||
+            error.status === 429 ||
+            error.status >= 500);
         if (!retryable || attempt === SEND_ATTEMPTS) {
           throw error;
         }
@@ -1204,10 +1205,6 @@ export const weixinPlatformFactory: PlatformFactory = {
     return new WeixinPlatform(options);
   },
 };
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === "AbortError";
-}
 
 /** 省略值为 `undefined` 的键，避免把 `context_token: undefined` 发出去 */
 function leaveDefined(record: Record<string, unknown>): Record<string, unknown> {

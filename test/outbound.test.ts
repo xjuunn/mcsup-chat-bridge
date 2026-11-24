@@ -252,21 +252,25 @@ describe("OutboundQueue", () => {
     expect(sent).toEqual(["private/u1/m1/"]);
   });
 
-  it("全部目标失败时收口为告警，不产生未处理的 rejection", async () => {
+  it("全部目标失败时收口为告警，后续消息继续发送", async () => {
     const log = fakeLog();
     const targets = book(log, { groups: ["g1"] });
-    const { outbound } = queue({
+    let failing = true;
+    const { outbound, sent } = queue({
       targets,
       log,
-      fail: () => true,
+      fail: () => failing,
     });
     outbound.push({ id: "m1", text: "hello" });
     await waitFor(
-      () => log.warns.some((text) => text.includes("出站队列异常")),
+      () => log.warns.some((text) => text.includes("Test 所有目标均发送失败（m1）")),
       "全部失败后收口",
     );
-    expect(
-      log.warns.some((text) => text.includes("Test 所有目标均发送失败（m1）")),
-    ).toBe(true);
+    // 一次平台故障不能把队列卡死：恢复后下一条照常发出
+    failing = false;
+    outbound.push({ id: "m2", text: "again" });
+    await waitFor(() => sent.length === 1, "后续消息继续发送");
+    expect(sent).toEqual(["group/g1/m2/"]);
+    expect(log.warns.some((text) => text.includes("出站队列异常"))).toBe(false);
   });
 });

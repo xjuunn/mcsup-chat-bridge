@@ -387,7 +387,7 @@ export interface GamePort {
 | OpenClaw 的 health 状态 | Hello 心跳 + 最近错误日志；尚未暴露到 `status` |
 | 平台原生消息 → 宿主 | `GamePort.sendChat` 按 `injectMode` 用 `say`（默认，写 `latest.log`、游戏内多 `[Server]` 前缀）或 `tellraw @a`（单标签、不写服务器日志）注入；内核做 60 秒回声抑制 |
 
-**密钥与配置**：`qq.clientSecret` / `telegram.botToken` / `discord.botToken` 用 SDK `secretInput` 标记为 `x-mcsup-secret`。宿主负责按插件隔离、加密持久化、管理读打码、握手下发明文；插件内部不再落盘，`clientSecret` 只发给官方凭证地址，Telegram token 只用于 Bot API URL（日志不打印完整 URL），Discord token 只用于 `Authorization: Bot` 头，OpenAPI 的 `access_token` 不写日志。
+**密钥与配置**：`qq.clientSecret` / `telegram.botToken` / `discord.botToken` / `weixin.botToken` 用 SDK `secretInput` 标记为 `x-mcsup-secret`。宿主负责按插件隔离、加密持久化、管理读打码、握手下发明文；插件内部不再落盘，`clientSecret` 只发给官方凭证地址，Telegram token 只用于 Bot API URL（日志不打印完整 URL），Discord token 只用于 `Authorization: Bot` 头，微信 token 只用于 `Authorization: Bearer` 头，OpenAPI 的 `access_token` 不写日志。微信 token 由扫码脚本取得后交给宿主配置，脚本本身不落盘。
 
 ### 5.4 若要接更多真实平台，建议的演进顺序
 
@@ -418,10 +418,10 @@ export interface GamePort {
 
 ### 5.6 跨平台同步：`relay` 作为可选能力
 
-QQ、Telegram 与 Discord 各自内部的群↔私聊镜像（`syncChannels`）只解决「同一平台内两个会话」的互通，不能让三个平台互相看到消息。跨平台同步因此单独做一条边，判定收敛在内核：
+QQ、Telegram、Discord 与微信各自内部的群↔私聊镜像（`syncChannels`）只解决「同一平台内两个会话」的互通，不能让平台之间互相看到消息；微信只有单聊形态，没有镜像。跨平台同步因此单独做一条边，判定收敛在内核：
 
 - 内核（`ChatBridge.handleInbound`）在去重、截断之后，把同一条入站消息投给**除来源平台之外、实现了 `relay` 的平台**；来源平台由 `PlatformDispatcher.relay` 按 `platform.id` 排除。
-- `relay` 是可选方法：`log` / `null` 不实现，就自然收不到转发；QQ / Telegram / Discord 实现后自动接入，内核不需要按平台 id 特判。这与 OpenClaw/Hermes 的「适配器之间两两对接」不同，新平台只要实现一个方法就能参与全互连。
+- `relay` 是可选方法：`log` / `null` 不实现，就自然收不到转发；QQ / Telegram / Discord / 微信实现后自动接入，内核不需要按平台 id 特判。这与 OpenClaw/Hermes 的「适配器之间两两对接」不同，新平台只要实现一个方法就能参与全互连。
 - 转发只写适配器自己的出站队列，**不回流 `ctx.inbound`**：入站路径只走一次，qq → telegram → qq 的环不存在，也不需要依赖平台侧回声窗口。
 - 跨平台不做媒体搬运：QQ 的图片要先转存 `qqbot-media://`，Telegram 的 `file_id` 只对同一个 bot 有效，Discord 的附件是临期签名 URL；三种句柄互不通用。正文里的 `[图片]` / `[视频]` 等占位原样保留，让接收方知道原消息带媒体。
 - 文本格式由 `src/platform-kit/format.ts` 的 `formatRelay` 统一：`[QQ 群] 昵称: 消息` / `[Telegram 私聊] 昵称: 消息` / `[Discord 群] 昵称: 消息`，接收方一眼看出说话的平台与场所。
@@ -453,6 +453,27 @@ QQ、Telegram 与 Discord 各自内部的群↔私聊镜像（`syncChannels`）�
 
 会话映射与其他平台不同的一点：频道（`channel_id`）对应 `group`，DM 频道对应 `private`。`privateUsers` 配置的是 **user id**，发送前经 `POST /users/@me/channels`（`recipient_id`）换成 DM `channel_id` 并缓存；学习到的私聊目标已经是 DM `channel_id`。入站媒体在文本里保留 `[图片]` 等占位，`forwardMedia` 只把图片 URL 作为 embed 立即镜像，不下载/上传，因此跨平台转发仍只带文本。
 
+### 5.9 微信适配器的落地取舍
+
+`src/platforms/weixin.ts` 对接**腾讯官方微信机器人（iLink Bot API）**，依据是腾讯 `Tencent/OpenClaw-Weixin` 的 `docs/protocol_zh_CN.md`。它同样采用「沙箱内长轮询」，不走企业微信群 webhook，也不需要公网回调地址。
+
+| 本文结论 | 微信落地 |
+| --- | --- |
+| 连接是长驻任务，停止要能中断 | `getUpdates` 长轮询；`stop` / `ctx.signal` 组合成 `AbortSignal`，停止时可中断轮询与退避 |
+| 重连退避放框架层（此处先留在适配器） | 指数退避 + 抖动；连续失败 3 次后拉长到 30 秒；401/403/404 致命停止 |
+| 入站先归一化，鉴权/去重先于业务 | `msgs[]` → `PlatformInboundMessage`；`message_id` 去重，白名单在 `ctx.inbound` 之前 |
+| 出站要表达分片、媒体、限流 | `maxLength` 码点分片、`sendIntervalMs` 节流；`ret=-2` 清 `context_token` 重试一次，5xx/网络错误最多 3 次 |
+| 目标 + 载荷 + 送达结果 | 与其它平台相同：同步 `deliver` + 内部出站队列，`status` 计数口径不变 |
+| 平台故障不能拖垮其他平台 | 轮询循环与出站队列各自收口，单条失败只记 warn |
+
+与其它平台不同的三点：
+
+1. **单聊形态**：官方客户端固定 `ChatType: "direct"`，所有会话都归一为 `private`；不提供群/私聊镜像。`allowPrivate` 默认 `true`，因为否则装完没有任何反应；仍与全局 `privateSync` 取并集并受白名单约束。
+2. **`context_token`**：出站必须回传入站消息带来的会话令牌，否则可能以 `ret=-2 prepare failed` 拒绝。适配器按会话持久化到宿主 KV（`weixin:context`，不是账号凭据），重启后不必等对方先说话。
+3. **uint64 id**：`message_id` / `msg_id` / `svr_id` 超过 2^53，直接 `JSON.parse` 会丢精度；适配器在解析前给这三类对象键的数字字面量加引号。
+
+token 由 `scripts/weixin-login.mjs` 扫码取得（腾讯没有后台复制入口），插件自身仍不落盘密钥。二维码在终端里由 `scripts/lib/qr.mjs` 零依赖绘制（Byte 模式、纠错等级 L、固定掩码 0），链接同时打印作为兜底。
+
 ---
 
 ## 6. 对两套实现的评价（用于选型参考）
@@ -476,5 +497,6 @@ QQ、Telegram 与 Discord 各自内部的群↔私聊镜像（`syncChannels`）�
 - QQ 官方机器人（API v2）的实现位于 `src/platforms/qq.ts`，并在 `scripts/real-host-check.mjs` 用真实 HTTP OpenAPI + WebSocket Gateway 假服务端做过协议级验证；真实 QQ 端联调需要用户提供 AppID/ClientSecret 与机器人环境。
 - Telegram 的实现位于 `src/platforms/telegram.ts`，用 `getUpdates` 长轮询（沙箱无公网入口，不用 webhook），offset 持久化到宿主 KV；`test/telegram.test.ts` 以真实 HTTP 假 Bot API（含长轮询挂起 / 唤醒）覆盖入站归一化、白名单、群私聊镜像、媒体 `file_id`、论坛话题、429 重试、offset 重启与 401/409 处理。真实联调需要用户提供 @BotFather 的 bot token 与机器人环境。
 - Discord 的实现位于 `src/platforms/discord.ts`，用出站 Bot Gateway + REST v10（不用 Webhook / Interactions Endpoint）；`test/discord.test.ts` 以真实 HTTP 假 REST + WebSocket 假 Gateway 覆盖 Identify、频道/私聊入站、白名单、learned targets、DM 解析、分片、镜像与图片 embed、`relay`、429 重试、401 停止与关闭码分支。真实联调需要用户提供 Developer Portal 的 bot token，并打开 Message Content Intent。
+- 微信的实现位于 `src/platforms/weixin.ts`，用腾讯 iLink 的 `getupdates` 长轮询 + `sendmessage`（单聊形态）；`test/weixin.test.ts` 以真实 HTTP 假 iLink 服务覆盖 uint64 id 保精度、入站归一化、游标与 `context_token` 持久化、`ret=-2`、`-14` 暂停、分片、5xx 重试与 `relay`。token 由 `scripts/weixin-login.mjs` 扫码取得，参考 `Tencent/OpenClaw-Weixin` 的协议文档与登录状态机。
 - 官方协议参考：`bot.q.qq.com` 的 API 调用指南、消息收发概述、WebSocket 方式与 `GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE` 事件；实现细节可对照 Hermes `plugins/platforms/qqbot/adapter.py` 与 OpenClaw 的 `qqbot` 通道。Discord 参考 `discord.com/developers/docs` 的 Gateway 生命周期、op 2/6/10/11 与 REST 限流说明。
 - 补全 OpenClaw 后，重点核对 `ChannelManager` 的完整状态机（暂停/恢复、重启交接、关闭顺序）与 health monitor 的交接分支，这些在本文只覆盖了主路径。

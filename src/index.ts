@@ -7,7 +7,7 @@
  * - 按会话（ctx）持有桥实例（WeakMap，支持同进程多个会话/测试宿主）
  * - 把宿主事件转给桥、把 op 查询转给桥
  *
- * 能力最小化：`console:write` 是高风险能力，只在 QQ / Telegram / Discord → 游戏方向使用；
+ * 能力最小化：`console:write` 是高风险能力，只在 QQ / Telegram / Discord / 微信 → 游戏方向使用；
  * 宿主未授予时入站降级为仅计数，出站（游戏 → 平台）不受影响。
  */
 
@@ -18,6 +18,7 @@ import { configSchema, resolveConfig } from "./config.js";
 import { ChatBridge } from "./core/bridge.js";
 import { createQueries } from "./ops/index.js";
 import { createRegistry } from "./builtin-platforms.js";
+import { weixinInteractiveSetup } from "./setup/weixin.js";
 import type { GamePort, InjectMode } from "./platform-kit/types.js";
 import type { KvLike } from "./core/targets.js";
 import { PLUGIN_VERSION } from "./version.js";
@@ -132,22 +133,25 @@ export const plugin = definePlugin({
   // 服务器绑定：`inboundServer` 是「平台消息注入哪台服务器」，`qq.server` /
   // `telegram.server` 是各适配器的覆盖值。宿主据此让插件跟随服务器启停——
   // 绑定的服务器启动前先拉起插件，全部停止后再收掉。
-  bind: { servers: ["inboundServer", "qq.server", "telegram.server", "discord.server"] },
+  bind: { servers: ["inboundServer", "qq.server", "telegram.server", "discord.server", "weixin.server"] },
   // 安装向导：`mcsup plugin install` 会先列能力授权，再逐项问这些值，
   // 写完后自动启用并启动，装完即可收发。只列「不填就收不到消息」的字段：
   // 群/私聊 chat id 可以留空，首条消息后从插件日志补；`allowPrivate` 等
   // 开关默认安全值，装完再用 `config set` 打开。
   // 平台凭据用 `when` 条件提问：没选 qq 就完全不问 QQ 凭据，反之亦然
   // （`when` 需要宿主支持 descriptor schema 4）。
+  // 微信没有可粘贴的 token：`interactive`（schema 5）让宿主拉起插件，
+  // 由插件在终端画二维码并扫码，登录结果经临时密钥文件回传。
   setup: {
     fields: [
       {
         path: "platforms",
         required: true,
         default: ["qq"],
-        choices: ["qq", "telegram", "discord", "log"],
+        choices: ["qq", "telegram", "discord", "weixin", "log"],
         label: "启用的平台",
-        description: "QQ 官方机器人需要 qq；Telegram 需要 telegram；Discord 需要 discord；本地日志需要 log（可多选）",
+        description:
+          "QQ 官方机器人需要 qq；Telegram 需要 telegram；Discord 需要 discord；微信需要 weixin；本地日志需要 log（可多选）",
       },
       {
         path: "injectMode",
@@ -205,7 +209,20 @@ export const plugin = definePlugin({
           "Discord Developer Portal → 你的应用 → Bot → Reset Token；只在启用了 discord 时询问。还需在 Bot 页打开 Message Content Intent",
         when: { path: "platforms", includes: "discord" },
       },
+      {
+        path: "weixin.botToken",
+        required: true,
+        secret: true,
+        interactive: true,
+        label: "微信 Bot Token",
+        description:
+          "用手机微信扫描终端里的二维码授权，token 由插件直接写回；只在启用了 weixin 时询问",
+        when: { path: "platforms", includes: "weixin" },
+      },
     ],
+    interactive: {
+      "weixin.botToken": weixinInteractiveSetup,
+    },
   },
   subscriptions: [...SUBSCRIPTIONS],
 

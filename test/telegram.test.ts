@@ -845,8 +845,8 @@ describe("Telegram 适配器（假 Bot API）", () => {
     startPlatform(fake, {});
 
     await waitFor(() => fake.webhookDeletes() === 1, "deleteWebhook");
-    await waitFor(() => fake.offsets.length >= 1, "重新轮询");
-    expect(logText(fake.log)).toContain("deleteWebhook");
+    await waitFor(() => fake.offsets.length >= 2, "重新轮询");
+    await waitFor(() => logText(fake.log).includes("deleteWebhook"), "deleteWebhook 日志");
   });
 
   it("停止后不再发送新消息", async () => {

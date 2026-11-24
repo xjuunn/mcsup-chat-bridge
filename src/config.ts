@@ -63,7 +63,7 @@ export const configSchema = s.object({
     label: "同步私聊消息",
     describe:
       "为 true 时所有启用的平台都接收私聊消息：注入游戏、群/私聊镜像与跨平台同步都会带上私聊；" +
-      "默认关闭，避免陌生人私聊机器人。只影响声明了私聊能力的平台（QQ / Telegram）",
+      "默认关闭，避免陌生人私聊机器人。只影响声明了私聊能力的平台（QQ / Telegram / Discord / 微信）",
   }),
   inboundServer: s.optional(
     s.string({
@@ -557,6 +557,121 @@ export const configSchema = s.object({
         }),
       },
       { label: "Discord 机器人（Bot Gateway）" },
+    ),
+  ),
+  weixin: s.optional(
+    s.object(
+      {
+        botToken: secretInput(
+          s.string({
+            max: 512,
+            label: "Bot Token",
+            describe:
+              "先运行 `node scripts/weixin-login.mjs` 扫码登录，脚本会打印 token；形如 wxbot_...（只用于 Authorization: Bearer，不会写入日志）",
+          }),
+        ),
+        apiBase: s.optional(
+          s.string({
+            max: 512,
+            label: "iLink 基址",
+            describe:
+              "默认 https://ilinkai.weixin.qq.com；扫码登录返回的 baseurl 不同时再改",
+          }),
+        ),
+        privateUsers: s.optional(
+          s.array(s.string({ max: 64, label: "用户 id" }), {
+            maxItems: 32,
+            label: "私聊对象",
+            describe:
+              "出站私聊 user id（微信侧的数字 id）。留空表示全部：出站发给给机器人发过消息的用户（记录在宿主 KV，重启后仍有效）",
+          }),
+        ),
+        allowedUsers: s.optional(
+          s.array(s.string({ max: 64, label: "用户 id" }), {
+            maxItems: 64,
+            label: "入站发言人白名单",
+            describe: "非空时只允许这些 user id 的消息进入游戏；空表示桥接聊天内所有人",
+          }),
+        ),
+        categories: s.optional(
+          s.array(s.enum(CATEGORIES), {
+            label: "转发类别",
+            describe: "微信出站只转发这些类别；省略时沿用全局 forwardCategories",
+          }),
+        ),
+        inbound: s.boolean({
+          default: true,
+          label: "接收微信消息",
+          describe: "为 false 时只出站，不把微信消息注入游戏",
+        }),
+        allowPrivate: s.boolean({
+          default: true,
+          label: "接收消息",
+          describe:
+            "微信机器人在官方客户端里只有单聊形态，默认接收；关闭后既不注入游戏也不参与跨平台同步（与全局 privateSync 取并集）",
+        }),
+        label: s.string({
+          default: "微信",
+          max: 16,
+          label: "游戏内标签",
+          describe: "注入游戏时显示的前缀，例如 [微信] user_id: 消息",
+        }),
+        server: s.optional(
+          s.string({
+            max: 64,
+            label: "入站服务器",
+            describe: "微信消息默认注入的服务器；省略时使用全局 inboundServer 或自动选择",
+          }),
+        ),
+        maxLength: s.integer({
+          default: 1_500,
+          min: 64,
+          max: 4_000,
+          label: "单条出站上限",
+          describe: "超过后按此长度分片发送；微信没有公开的单条上限，按保守值切分",
+        }),
+        sendIntervalMs: s.integer({
+          default: 1_000,
+          min: 0,
+          max: 10_000,
+          label: "发送间隔",
+          describe: "两次 iLink 调用之间的最小间隔，用于温柔限流",
+        }),
+        apiTimeoutMs: s.integer({
+          default: 15_000,
+          min: 1_000,
+          max: 60_000,
+          label: "API 超时",
+        }),
+        pollTimeoutMs: s.integer({
+          default: 35_000,
+          min: 1_000,
+          max: 120_000,
+          label: "长轮询等待",
+          describe:
+            "getUpdates 的等待毫秒数；官方客户端用 35 秒，服务端可在响应里用 longpolling_timeout_ms 调整",
+        }),
+        reconnectMinMs: s.integer({
+          default: 1_000,
+          min: 200,
+          max: 60_000,
+          label: "重连最小间隔",
+        }),
+        reconnectMaxMs: s.integer({
+          default: 60_000,
+          min: 1_000,
+          max: 600_000,
+          label: "重连最大间隔",
+        }),
+        reconnectMaxAttempts: s.integer({
+          default: 0,
+          min: 0,
+          max: 10_000,
+          label: "最大重连次数",
+          describe: "0 表示无限重试；401/403 等凭证问题会直接停止",
+        }),
+      },
+      { label: "微信机器人（腾讯 iLink 长轮询）" },
     ),
   ),
 });

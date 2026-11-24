@@ -3,6 +3,7 @@ import { PluginError } from "mcsup-plugin";
 
 import { BUILTIN_PLATFORMS } from "../src/builtin-platforms.js";
 import { discordPlatformFactory } from "../src/platforms/discord.js";
+import { weixinPlatformFactory } from "../src/platforms/weixin.js";
 import { PlatformRegistry } from "../src/platform-kit/registry.js";
 import { expectPlatformContract, PLATFORM_ID } from "./helpers/platform-contract.js";
 
@@ -23,6 +24,10 @@ describe("平台契约（内置适配器）", () => {
     await expectPlatformContract(discordPlatformFactory, { settings: { botToken: "test-token" } });
   });
 
+  it("weixin 满足最小契约", async () => {
+    await expectPlatformContract(weixinPlatformFactory, { settings: { botToken: "test-token" } });
+  });
+
   it("所有内置平台的 id 与标题合法，且互不重名", () => {
     const ids = BUILTIN_PLATFORMS.map((factory) => factory.id);
     expect(new Set(ids).size).toBe(ids.length);
@@ -32,7 +37,7 @@ describe("平台契约（内置适配器）", () => {
     }
   });
 
-  for (const id of ["qq", "telegram", "discord"]) {
+  for (const id of ["qq", "telegram", "discord", "weixin"]) {
     it(`${id} 缺凭据时按 invalid_input 拒绝，而不是运行期崩溃`, () => {
       const registry = new PlatformRegistry();
       for (const factory of BUILTIN_PLATFORMS) {

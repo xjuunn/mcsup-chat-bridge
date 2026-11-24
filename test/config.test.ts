@@ -106,6 +106,32 @@ describe("配置解析", () => {
     expect(() => parse({ platforms: ["discord"], discord: {} })).toThrow();
   });
 
+  it("微信配置片段随 platforms 一起下发", () => {
+    const config = resolveConfig(
+      parse({
+        platforms: ["weixin"],
+        weixin: {
+          botToken: "wxbot_token",
+          privateUsers: ["42"],
+          allowedUsers: ["42", "43"],
+        },
+      }),
+    );
+    expect(config.platformSettings.weixin).toMatchObject({
+      botToken: "wxbot_token",
+      privateUsers: ["42"],
+      allowedUsers: ["42", "43"],
+      inbound: true,
+      allowPrivate: true,
+      maxLength: 1500,
+      pollTimeoutMs: 35000,
+    });
+  });
+
+  it("微信缺少 botToken 时 schema 拒绝", () => {
+    expect(() => parse({ platforms: ["weixin"], weixin: {} })).toThrow();
+  });
+
   it("入站开关与上限有默认值，且可覆盖", () => {
     const defaults = resolveConfig(parse({}));
     expect(defaults.inbound).toBe(true);
@@ -137,7 +163,7 @@ describe("平台注册表", () => {
 
   it("内置平台可列出", () => {
     const ids = createRegistry().list().map((info) => info.id);
-    expect(ids).toEqual(["discord", "log", "null", "qq", "telegram"]);
+    expect(ids).toEqual(["discord", "log", "null", "qq", "telegram", "weixin"]);
   });
 
   it("重复注册与非法 id 被拒绝", () => {

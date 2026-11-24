@@ -2,15 +2,15 @@
 
 MCSUP 聊天桥插件：订阅 Minecraft 服务器的聊天、控制台与生命周期事件，归一化为统一消息模型，分类后分发到可插拔的聊天平台。
 
-架构分两层：平台无关内核（采集 → 归一化 → 分类 → 入库 → 分发）与可插拔平台适配器。内置 **QQ 官方机器人（API v2）**、**Telegram 机器人（Bot API 长轮询）**、**Discord 机器人（Bot Gateway + REST）**、`log`、`null` 五种适配器。
+架构分两层：平台无关内核（采集 → 归一化 → 分类 → 入库 → 分发）与可插拔平台适配器。内置 **QQ 官方机器人（API v2）**、**Telegram 机器人（Bot API 长轮询）**、**Discord 机器人（Bot Gateway + REST）**、**微信机器人（腾讯 iLink 长轮询）**、`log`、`null` 六种适配器。
 
-QQ、Telegram 与 Discord 适配器支持**双向互通**：
+QQ、Telegram、Discord 与微信适配器支持**双向互通**：
 
 - 游戏 → 平台：玩家聊天按 `[玩家名]:消息` 发送到群/私聊；
-- 平台 → 游戏：群聊消息（可选私聊）经 `console:write` 注入游戏，显示为 `[QQ] 昵称: 消息` / `[Telegram] 昵称: 消息` / `[Discord] 昵称: 消息`；注入方式由 `injectMode` 决定（默认 `say` 会写进服务器日志，`tellraw` 只显示在游戏内）。
-- 三者都支持群聊与私聊**互相同步**（`qq.syncChannels` / `telegram.syncChannels` / `discord.syncChannels`）；Telegram 复用 `file_id` 直接转发图片/视频/文件，Discord 用图片 URL 作为 embed 立即镜像。
+- 平台 → 游戏：群聊消息（可选私聊）经 `console:write` 注入游戏，显示为 `[QQ] 昵称: 消息` / `[Telegram] 昵称: 消息` / `[Discord] 昵称: 消息` / `[微信] user_id: 消息`；注入方式由 `injectMode` 决定（默认 `say` 会写进服务器日志，`tellraw` 只显示在游戏内）。
+- QQ / Telegram / Discord 支持群聊与私聊**互相同步**（`qq.syncChannels` / `telegram.syncChannels` / `discord.syncChannels`）；Telegram 复用 `file_id` 直接转发图片/视频/文件，Discord 用图片 URL 作为 embed 立即镜像。微信官方客户端只建模单聊，因此不提供群/私聊镜像。
 - **私聊同步**：顶层 `privateSync`（默认 `false`）一次决定所有已选平台是否接收私聊，安装向导里问一次；开启后私聊会参与注入游戏、群/私聊镜像与跨平台同步。与各平台的 `allowPrivate` 取并集，关掉它不会覆盖平台里显式打开的配置。
-- **跨平台同步**：QQ、Telegram 与 Discord 默认互相转发（`crossPlatform=true`），群里或私聊收到的消息会发到其它平台的所有会话；转发形如 `[QQ 群] 昵称: 消息`，来源平台不回发自己。图片等媒体不跨平台搬运，只保留 `[图片]` 占位。
+- **跨平台同步**：四个聊天平台默认互相转发（`crossPlatform=true`），群里或私聊收到的消息会发到其它平台的所有会话；转发形如 `[QQ 群] 昵称: 消息`，来源平台不回发自己。图片等媒体不跨平台搬运，只保留 `[图片]` 占位。
 
 ## 快速开始
 
@@ -58,10 +58,15 @@ mcsup plugin install --from .\build
      还没有服务器时才退回手输；`同步私聊消息` 是**全局开关**（默认「否」），
      选「是」后所有已选平台的私聊都参与注入、镜像与跨平台同步，不再按平台
      分别问；
-   - `QQ AppID` / `QQ ClientSecret` / `Telegram Bot Token` 三项**按平台条件提问**：
+   - `QQ AppID` / `QQ ClientSecret` / `Telegram Bot Token` / `Discord Bot Token` /
+     `微信 Bot Token` **按平台条件提问**：
      平台里选了 `qq` 才会问前两项，选了 `telegram` 才会问 Bot Token，选了 `discord`
-     才会问 Discord Bot Token，没选的平台一个都不问（`setup.fields[].when`，需要支持
-     descriptor schema 4 的宿主）；被问到时都是必填，留空会提示后重新提问；
+     才会问 Discord Bot Token，选了 `weixin` 才会问微信 Bot Token，没选的平台一个都不问
+     （`setup.fields[].when`，需要支持 descriptor schema 4 的宿主）；被问到时都是必填，
+     留空会提示后重新提问。微信 token 不能从后台复制：宿主支持 descriptor schema 5 时
+     **安装向导会直接拉起插件在终端显示二维码**（`setup.fields[].interactive`），扫码后
+     token 经 0600 临时文件回传，不用手工复制；旧宿主会退回手工输入，可先运行
+     `node scripts/weixin-login.mjs` 扫码再粘贴；
    - 输入框**不会预填旧值**：留空即沿用，密钥每输入一个字符显示一个 `*`；
    - 必填项没有旧值可沿用时不能回车跳过，会提示后重新提问（`Ctrl+C` 取消）；
 3. 群 / 私聊 id **不用填**：留空即全部（入站不限会话，出站发给收到过消息的
@@ -70,7 +75,7 @@ mcsup plugin install --from .\build
    `discord.groups` / `discord.privateUsers` 收窄；
 4. 写配置后自动启用并启动，成功后直接显示「已安装并启动」。
 5. 插件跟随服务器启停：`inboundServer`（以及可选的 `qq.server` / `telegram.server` /
-   `discord.server`）
+   `discord.server` / `weixin.server`）
    选中的服务器启动前先启动插件，停止后插件随之停止（多台服务器共用同一个插件时，
    最后一台停止才停），日常只需 `mcsup server start / stop`。
 
@@ -102,20 +107,25 @@ src/
     qq.ts                   QQ 官方机器人 API v2（WebSocket Gateway + OpenAPI，双向）
     telegram.ts             Telegram Bot API（getUpdates 长轮询 + REST，双向、群私聊同步）
     discord.ts              Discord Bot Gateway（WebSocket + REST v10，双向、频道私聊同步）
+    weixin.ts               微信机器人（腾讯 iLink getUpdates 长轮询 + sendMessage，单聊双向）
     log.ts                  占位平台：写到插件日志
     null.ts                 空平台：只采集、不投递
   builtin-platforms.ts      内置适配器目录（组合根：BUILTIN_PLATFORMS + createRegistry）
   events/normalize.ts       宿主事件校验（zod）与归一化
-  config.ts                 配置 schema（含 QQ / Telegram / Discord 与密钥字段）、resolveConfig
+  config.ts                 配置 schema（含 QQ / Telegram / Discord / 微信与密钥字段）、resolveConfig
   ops/index.ts              messages（table + 分页）与 status（detail，含入站统计）
+  setup/weixin.ts           微信 Bot Token 的交互式安装字段（拉起扫码脚本，token 经临时文件回传）
   index.ts                  definePlugin 接线、能力声明、GamePort（say / tellraw）
 scripts/
   ensure-sdk.mjs            SDK 缺失或过期（mtime）时自动构建
+  weixin-login.mjs          微信扫码登录：终端显示二维码，取得 bot token，可 --apply 写入配置
+  bundle-setup.mjs          构建后把扫码脚本与 lib/qr.mjs 复制进 build/setup/
+  lib/qr.mjs                零依赖二维码编码与终端渲染（Byte 模式、等级 L）
   real-host-check.mjs       真实子进程 + 真实 TCP 假宿主 + 真实 QQ 官方协议（REST + Gateway）
-test/                       分类、存储、分发、桥、入站、QQ、Telegram、Discord、配置、事件、MockHost
+test/                       分类、存储、分发、桥、入站、QQ、Telegram、Discord、微信、二维码、配置、事件、MockHost
 ```
 
-构建产物在 `build/`：`manifest.json`、`descriptor.json`、`bin/run.cmd|run.sh`、`bin/entry.mjs`、`dist/`、`node_modules/`（vendor 的运行期依赖）。整个目录可直接 `mcsup plugin install --from`。
+构建产物在 `build/`：`manifest.json`、`descriptor.json`、`bin/run.cmd|run.sh`、`bin/entry.mjs`、`dist/`、`setup/`（扫码登录脚本）、`node_modules/`（vendor 的运行期依赖）。整个目录可直接 `mcsup plugin install --from`。
 
 ## 消息模型
 
@@ -167,9 +177,9 @@ test/                       分类、存储、分发、桥、入站、QQ、Teleg
 | `consoleForward` | `false` | 默认不转发控制台/日志行（`source=console`）；只采集入库。需要把服务器 `say`、日志同步到平台时再打开 |
 | `storeSize` | `200` | 环形缓存条数（10–5000） |
 | `queueCapacity` | `256` | 单平台出站与全局入站队列的积压上限（8–4096），超出丢最旧 |
-| `inbound` | `true` | 是否允许平台消息注入游戏；关闭后 QQ / Telegram / Discord 仍可出站 |
-| `crossPlatform` | `true` | 是否让平台之间互相同步：一个平台收到的消息转给其它所有启用了同步的平台（如 QQ ↔ Telegram ↔ Discord）。与 `inbound` 独立：关掉入站只影响「平台 → 游戏」，平台之间仍互通；关掉它则各平台只与游戏双向。只有实现 `relay` 的适配器会接收转发，`log` / `null` 不接收 |
-| `privateSync` | `false` | 是否接收私聊：一次对所有已选平台生效，开启后私聊参与注入游戏、群/私聊镜像与跨平台同步。与各平台的 `allowPrivate` 取并集（平台里显式打开的不受它影响）；只影响声明了私聊能力的适配器（QQ / Telegram / Discord） |
+| `inbound` | `true` | 是否允许平台消息注入游戏；关闭后 QQ / Telegram / Discord / 微信仍可出站 |
+| `crossPlatform` | `true` | 是否让平台之间互相同步：一个平台收到的消息转给其它所有启用了同步的平台（如 QQ ↔ Telegram ↔ Discord ↔ 微信）。与 `inbound` 独立：关掉入站只影响「平台 → 游戏」，平台之间仍互通；关掉它则各平台只与游戏双向。只有实现 `relay` 的适配器会接收转发，`log` / `null` 不接收 |
+| `privateSync` | `false` | 是否接收私聊：一次对所有已选平台生效，开启后私聊参与注入游戏、群/私聊镜像与跨平台同步。与各平台的 `allowPrivate` 取并集（平台里显式打开的不受它影响）；只影响声明了私聊能力的适配器（QQ / Telegram / Discord / 微信） |
 | `inboundServer` | 自动 | 入站默认服务器；省略时选运行中的服务器 |
 | `inboundMaxLength` | `200` | 单条入站文本上限（32–512），超长截断 |
 | `injectMode` | `"say"` | 平台消息注入游戏的方式：`say` 会写入 `logs/latest.log`，但游戏内多出 `[Server]` 前缀；`tellraw` 游戏里只有 `[QQ]` / `[Telegram]` 标签但不写服务器日志（原版只有 `say`/`me` 这类服务器广播会进日志） |
@@ -239,6 +249,21 @@ test/                       分类、存储、分发、桥、入站、QQ、Teleg
 | `discord.apiTimeoutMs` | `15000` | 单次 HTTP 调用超时 |
 | `discord.reconnectMinMs` / `reconnectMaxMs` | `1000` / `60000` | 断线重连退避范围（带抖动） |
 | `discord.reconnectMaxAttempts` | `0` | 最大重连次数，0 表示无限重试；401 凭证问题会直接停止 |
+| `weixin.botToken` | 无（必填） | 微信机器人 token，只能由 `node scripts/weixin-login.mjs` 扫码取得（形如 `wxbot_...`）；界面遮蔽、读取打码 |
+| `weixin.apiBase` | `"https://ilinkai.weixin.qq.com"` | iLink 基址；扫码登录返回的 `baseurl` 不同时再改 |
+| `weixin.privateUsers` | `[]` | 出站私聊 user id，同时是入站白名单。**留空 = 全部**：入站不限对象，出站发给给机器人发过消息的用户；学到的目标记在宿主 `storage:kv`，重启后仍有效 |
+| `weixin.allowedUsers` | `[]` | 非空时只允许这些 user id 的消息进入游戏 |
+| `weixin.categories` | 沿用全局 | 微信出站类别过滤 |
+| `weixin.inbound` | `true` | 是否把微信消息注入游戏；为 `false` 时仍参与跨平台同步 |
+| `weixin.allowPrivate` | `true` | 微信官方客户端只有单聊形态，默认接收；关闭后既不注入游戏也不参与跨平台同步（顶层 `privateSync=true` 时同样生效，两者取并集） |
+| `weixin.label` | `"微信"` | 游戏内显示为 `[微信] user_id: 消息`（协议没有昵称字段，用 user id 作显示名） |
+| `weixin.server` | 全局 | 该适配器的入站默认服务器，同时决定插件跟随哪台服务器启停 |
+| `weixin.maxLength` | `1500` | 单条出站上限，超出按此分片（微信没有公开上限，按保守值切分） |
+| `weixin.sendIntervalMs` | `1000` | 两次 iLink 调用的最小间隔，温柔限流 |
+| `weixin.apiTimeoutMs` | `15000` | 单次 HTTP 调用超时 |
+| `weixin.pollTimeoutMs` | `35000` | `getUpdates` 长轮询等待毫秒数；服务端可用 `longpolling_timeout_ms` 调整 |
+| `weixin.reconnectMinMs` / `reconnectMaxMs` | `1000` / `60000` | 断线重连退避范围（带抖动） |
+| `weixin.reconnectMaxAttempts` | `0` | 最大重连次数，0 表示无限重试；401/403 凭证问题会直接停止 |
 
 平台专属配置放在与适配器 id 同名的字段下。QQ 示例：
 
@@ -301,16 +326,19 @@ Telegram 示例（多个平台可同时启用）：
 }
 ```
 
-**密钥与持久化**：`qq.clientSecret` / `telegram.botToken` / `discord.botToken` 用 SDK 的
-`secretInput` 标记，descriptor 里是 `x-mcsup-secret: true`。宿主负责按插件隔离、加密持久化
-（`secrets.json`），管理端读取时返回 `***`，插件握手时收到明文才能工作；插件自身
-不落盘任何密钥，日志与 `status` 也不会输出 `clientSecret`、`botToken` 或
-`access_token`。Telegram 的 HTTP URL 含 token，Discord 的请求头含 token，适配器日志
-只记录方法名与路由，不打印完整 URL / Authorization。
+**密钥与持久化**：`qq.clientSecret` / `telegram.botToken` / `discord.botToken` /
+`weixin.botToken` 用 SDK 的 `secretInput` 标记，descriptor 里是 `x-mcsup-secret: true`。
+宿主负责按插件隔离、加密持久化（`secrets.json`），管理端读取时返回 `***`，插件握手时
+收到明文才能工作；插件自身不落盘任何密钥，日志与 `status` 也不会输出 `clientSecret`、
+`botToken` 或 `access_token`。Telegram 的 HTTP URL 含 token，Discord 的请求头含 token，
+微信的 `Authorization: Bearer` 含 token，适配器日志只记录方法名与路由，不打印完整 URL /
+Authorization。微信登录脚本不把 token 写进仓库或插件 KV：交互式安装时只写 0600 临时文件，
+手工运行时只打印一次并交给宿主配置。
 
 **写入顺序（手工配置时）**：`mcsup plugin config set` 每次都会对**合并后的完整配置**
-做 schema 校验。`qq` / `telegram` / `discord` 片段都是可选的，但**一旦写了片段**，其中
-`qq.appId` + `qq.clientSecret`、`telegram.botToken`、`discord.botToken` 就是必填项
+做 schema 校验。`qq` / `telegram` / `discord` / `weixin` 片段都是可选的，但**一旦写了片段**，其中
+`qq.appId` + `qq.clientSecret`、`telegram.botToken`、`discord.botToken`、`weixin.botToken`
+就是必填项
 （片段写一半会得到 `config.telegram.botToken: required field is missing`，且该次写入
 不会生效）。所以手工配置时先写完整的平台块，再写 `platforms` 等顶层键：
 
@@ -620,7 +648,7 @@ messages { "server": "survival", "limit": 20 }
 | 游戏 → Discord（非聊天） | `[加入] Alex: Alex 加入了游戏` | 用中文类别标签，避免歧义 |
 | Discord → 游戏 | `[Discord] 昵称: 消息` | 通过 `injectMode` 注入（默认 `say`，游戏内会多出 `[Server]` 前缀；改成 `tellraw` 则只有单标签）；可选 `discord.server` / `inboundServer` |
 | Discord 频道 ↔ 私聊 | `[群] 昵称: ...` / `[私聊] 昵称: ...` | `syncChannels` 镜像，来源会话不重复发送 |
-| Discord → 其它平台 | `[Discord 群] 昵称: 消息` / `[Discord 私聊] 昵称: 消息` | 跨平台同步（`crossPlatform`），发到 QQ / Telegram 的所有会话；只转发文本，媒体保留占位，不回发来源平台 |
+| Discord → 其它平台 | `[Discord 群] 昵称: 消息` / `[Discord 私聊] 昵称: 消息` | 跨平台同步（`crossPlatform`），发到 QQ / Telegram / 微信的所有会话；只转发文本，媒体保留占位，不回发来源平台 |
 
 入站把附件按 `content_type` 转成 `[图片]` / `[视频]` / `[音频]` / `[文件: 名称]`
 占位，贴纸转为 `[表情]`。`discord.forwardMedia=true`（默认）时，频道/私聊镜像会把
@@ -645,7 +673,7 @@ messages { "server": "survival", "limit": 20 }
   机器人自己发的消息不会触发入站，因此不会回环。没有频道目标时会告警一次「私聊镜像
   暂时发不到频道」，补一条频道消息或填上 `discord.groups` 即可。
 - **跨平台同步**：`crossPlatform=true`（默认）时，Discord 收到的消息会以
-  `[Discord 群] 昵称: 消息` 发给 QQ / Telegram 的全部会话，反之同理。转发走适配器自己的
+  `[Discord 群] 昵称: 消息` 发给 QQ / Telegram / 微信 的全部会话，反之同理。转发走适配器自己的
   出站队列，不回流 `ctx.inbound`；跨平台不搬运媒体，只保留正文里的 `[图片]` 等占位。
 - **出站目标（跨重启）**：`discord.groups` / `discord.privateUsers` 留空时，目标取
   「收到过消息的会话」，写在宿主 `storage:kv`（键 `discord:targets`）；未授予
@@ -674,11 +702,113 @@ DM channel 缓存、分片、频道/私聊镜像与图片 embed、跨平台 `rel
 `discord.botToken` 换成 Developer Portal 的 token，打开 Message Content Intent 并把
 机器人拉进服务器。
 
+## 微信机器人对接
+
+本项目对接**腾讯官方微信机器人（iLink Bot API）**：`getUpdates` 长轮询收取消息，
+`sendMessage` 发送文本。它与 Telegram 同构，插件运行在宿主沙箱里，不需要公网回调地址，
+也不走企业微信群 webhook 或公众号那套必须暴露 URL 的方案。
+
+### 前置条件
+
+1. 安装时选上 `weixin`，向导问「微信 Bot Token」时会直接启动插件扫码登录：
+   终端画出二维码，用手机微信扫码；token 由脚本写进 0600 临时文件回传，
+   不要求手工复制（宿主需支持 descriptor schema 5 的 `setup.fields[].interactive`）。
+2. 旧宿主或不走安装向导时，手工运行扫码脚本，终端同样会直接把二维码画出来：
+
+   ```powershell
+   node scripts/weixin-login.mjs
+   ```
+
+   二维码由 `scripts/lib/qr.mjs` 零依赖生成，黑字白底并保留 4 个模块的静默区；
+   链接也会同时打印，终端显示不了块字符时加 `--plain` 只看链接。脚本按腾讯的
+   iLink 登录流程处理 `wait` / `scaned` / `confirmed` / `expired` /
+   `scaned_but_redirect`，需要 PIN 时会提示输入手机微信显示的数字。成功后**只打印一次**
+   bot token。
+3. 把 token 写入配置。可以重跑脚本并加 `--apply` 自动完成（写入 `weixin.botToken`、
+   把 `weixin` 并入 `platforms`、重启插件），也可以手工：
+
+   ```powershell
+   mcsup plugin config set chat-bridge weixin.botToken --secret   # 粘贴 token
+   mcsup plugin config set chat-bridge platforms '["weixin", ...]'
+   mcsup plugin restart chat-bridge
+   ```
+
+4. 扫码的微信号本身只对应一个机器人会话；`privateUsers` 不用手填，对方先给机器人发一条
+   消息就会记下目标（写进宿主 `storage:kv` 的 `weixin:targets`，重启不丢）。
+5. 微信官方客户端把机器人会话固定建模为单聊（`ChatType: "direct"`），因此本项目只支持
+   单聊：不提供 `groups` / `syncChannels` / `forwardMedia`，避免把一对一会话互相镜像。
+
+### 协议链路
+
+- **鉴权**：请求头 `AuthorizationType: ilink_bot_token` + `Authorization: Bearer <token>`，
+  另带随机 `X-WECHAT-UIN`、`iLink-App-Id: bot` 与 `iLink-App-ClientVersion`。日志不打印
+  token 与完整请求头。
+- **`base_info`**：每个 POST 都带 `channel_version` 与 `bot_agent`。服务端要求
+  `channel_version` 前三段是 `3.x.x`，本项目写成 `3.0.1/mcsup-chat-bridge-<版本>`；
+  `bot_agent` 为 `mcsup-chat-bridge/<版本>`。
+- **入站**：`POST /ilink/bot/getupdates`，请求体带上次返回的 `get_updates_buf`；服务端
+  有新消息或长轮询超时后返回 `msgs` 与新的游标。游标持久化到 `storage:kv`（键
+  `weixin:sync`），重启后不重复收取旧消息。客户端超时按正常控制流处理。
+- **出站**：`POST /ilink/bot/sendmessage`，正文放在 `msg.item_list[0].text_item.text`；
+  入站消息带 `context_token` 时必须原样回传。令牌按会话持久化（键 `weixin:context`，
+  不是账号凭据）；服务端返回 `ret=-2` 时清掉令牌重试一次。
+- **生命周期**：启动时 `POST /ilink/bot/msg/notifystart`、停止时 `msg/notifystop`；
+  失败只记调试日志，不阻塞启停。
+- **token 失效**：`ret` / `errcode` 为 `-14` 时暂停收发 60 分钟（与官方客户端一致），
+  避免把失效 token 打成重试风暴；持续失效需重新扫码并更新 `weixin.botToken`。
+
+### 消息格式
+
+| 方向 | 格式 | 说明 |
+| --- | --- | --- |
+| 游戏 → 微信 | `[玩家名]:消息` | 玩家聊天严格使用此格式 |
+| 游戏 → 微信（非聊天） | `[加入] Alex: Alex 加入了游戏` | 用中文类别标签 |
+| 微信 → 游戏 | `[微信] user_id: 消息` | 协议没有昵称字段，显示名用对方的 `from_user_id`，不编造姓名 |
+| 微信 → 其它平台 | `[微信 私聊] user_id: 消息` | 跨平台同步（`crossPlatform`），发到 QQ / Telegram / Discord 的所有会话；不回发来源平台 |
+
+入站把 `item_list` 归一为文本：`type=1` 取 `text_item.text`；`type=3` 优先用
+`voice_item.text`（语音转写），没有转写时保留 `[语音]`；图片 / 视频 / 文件分别转为
+`[图片]` / `[视频]` / `[文件: 名称]`。媒体不下载也不上传：CDN 内容是 AES 加密的，
+跨平台句柄也不通用。
+
+### 可靠性行为
+
+- **鉴权错误**：401/403 停止重连并提示重新扫码；404 视为 `weixin.apiBase` 配错。
+- **重连**：指数退避 + 抖动（`reconnectMinMs` / `reconnectMaxMs`），
+  `reconnectMaxAttempts=0` 表示无限重试；连续失败达到 3 次后拉长到 30 秒。
+- **限流与重试**：两次 iLink 调用之间至少 `sendIntervalMs`；5xx 与网络错误退避重试，
+  单条消息最多 3 次；`ret=-2` 只清 `context_token` 重试一次。
+- **去重**：`message_id` / `msg_id` / `svr_id` 是 uint64，直接 `JSON.parse` 会落到
+  double 精度、相邻 id 可能相同。适配器在解析前给这三类**对象键**的数字字面量加引号，
+  保留完整精度；再按最近 1000 条去重，桥内核再按 `platform:id` 兜一层。
+- **过滤**：`weixin.allowedUsers` 收窄发言人，`weixin.privateUsers` 收窄私聊对象；
+  被丢弃时按发送者告警一次并打印可填进配置的 user_id。
+- **跨平台同步**：`crossPlatform=true`（默认）时，微信收到的消息会以
+  `[微信 私聊] user_id: 消息` 发给其它平台的全部会话；转发走适配器自己的出站队列，
+  不回流 `ctx.inbound`，因此不会成环。
+
+### 已知限制
+
+- **token 只能扫码取得**：腾讯没有后台复制入口，插件也不把密钥落盘，所以首次使用必须
+  先跑 `scripts/weixin-login.mjs`；token 丢失后要重新扫码（必要时先在手机微信解除旧绑定）。
+- **扫码后无法获取 token 的情况**：服务端返回 `binded_redirect` 表示该微信号已绑定过
+  另一个客户端，不会再签发 token；脚本会直接说明原因。
+- 官方客户端只建模单聊，本项目不假设微信群机器人会话存在；群聊需要腾讯后续开放协议。
+- 协议不提供发言人昵称，游戏内只能用 user id；需要更友好的名字得另建一份 id → 昵称映射。
+- 媒体只有占位：不解密 CDN 内容，也不跨平台搬运图片 / 语音 / 文件。
+
+### 本地验证
+
+`test/weixin.test.ts` 用真实的 HTTP 假 iLink 服务覆盖：配置解析、uint64 消息 id 保精度、
+文本/语音/媒体归一化、单聊入站与白名单、learned targets、`get_updates_buf` 游标持久化、
+`context_token` 回传与 `ret=-2` 重试、分片、5xx 重试、`-14` 暂停、`relay` 跨平台转发与
+启停通知。真实联调只需按上面的前置条件扫码取得 token。
+
 ## 扩展一个新的聊天平台
 
-只需要「配置 + 一个文件 + 注册一行 + 测试」，内核与 op 层都不用改。QQ、Telegram
-与 Discord 已内置，可直接参照 `src/platforms/qq.ts` / `src/platforms/telegram.ts` /
-`src/platforms/discord.ts`；适配器目录只放平台实现，契约与公共件在
+只需要「配置 + 一个文件 + 注册一行 + 测试」，内核与 op 层都不用改。QQ、Telegram、
+Discord 与微信已内置，可直接参照 `src/platforms/qq.ts` / `src/platforms/telegram.ts` /
+`src/platforms/discord.ts` / `src/platforms/weixin.ts`；适配器目录只放平台实现，契约与公共件在
 `src/platform-kit/`。完整清单（含配置、共享件、测试与自查）见
 [`docs/adding-a-platform.md`](docs/adding-a-platform.md)。
 
@@ -789,7 +919,7 @@ it("满足平台最小契约", async () => {
 });
 ```
 
-协议收发行为按 QQ / Telegram / Discord 的用例写：配置解析、目标（配置与学习）、
+协议收发行为按 QQ / Telegram / Discord / 微信 的用例写：配置解析、目标（配置与学习）、
 入站白名单、`inbound=false` 只同步不注入、`relay` 不回流。
 
 ### 适配器约定
@@ -841,7 +971,7 @@ npm run test:real   # 真实进程 + 真实 TCP 端点
 - 环形缓存、去重、游标分页、容量淘汰、过滤、超长文本截断、持续大量写入
 - 固定环队列、单平台保序、平台隔离、持续溢出丢最旧、平台启动失败回滚、停止排空
 - 桥的启动/停止/配置热更新/启动前配置/平台切换/过滤配置不重建/未知平台回滚
-- 配置默认值、去重、平台配置切片、QQ / Telegram / Discord 配置片段与入站默认值、注册表重复与非法 id
+- 配置默认值、去重、平台配置切片、QQ / Telegram / Discord / 微信配置片段与入站默认值、注册表重复与非法 id
 - 事件负载校验、非法时间回退、缺失服务器名兜底
 - **入站**：格式化注入、`inboundServer`、去重、截断、全局关闭、无 `console:write` 降级、回声抑制
 - **跨平台同步**：转发目标选择（排除来源平台、只投给实现 `relay` 的平台）、
@@ -857,6 +987,10 @@ npm run test:real   # 真实进程 + 真实 TCP 端点
   频道/私聊入站、`guilds` / `groups` / `allowedUsers` 白名单、learned targets、
   私聊 user id → DM channel 缓存、分片、频道/私聊镜像与图片 embed、跨平台 `relay`、
   429 `retry_after` 重试、401 停止、关闭码 4009 重新 Identify / 4000 Resume / 4014 致命
+- **微信**：配置校验与默认值、假 iLink 长轮询（挂起 / 唤醒 / 游标前进）、uint64 消息 id
+  保精度、文本/语音转写/媒体占位归一化、单聊入站与白名单、learned targets、
+  `context_token` 回传与 `ret=-2` 重试、分片、5xx 重试、`-14` 暂停 60 分钟、
+  跨平台 `relay`、启停通知
 - **出站目标持久化**：跨实例读回群/私聊目标、重复会话不重复写盘、无 `storage:kv` 时退化、
   记录损坏按空处理、超上限淘汰、写入失败只告警一次；适配器侧覆盖「重启后仍镜像到记下的群」
   「首条群消息写回 KV」「无群目标时告警一次」
@@ -894,10 +1028,10 @@ Windows 启动器经 `cmd.exe /d /s /c` 调用，并使用 `windowsVerbatimArgum
 
 ## 已知限制 / 下一步
 
-- 已内置 QQ 官方机器人（API v2）、Telegram Bot API（长轮询）与 Discord Bot Gateway（WebSocket + REST v10）。
-- 入站只处理文本与常见消息段（图片/语音/文件转为占位文本）；不把媒体内容落盘。Telegram 的群/私聊镜像可直接复用 `file_id` 转发媒体；QQ 需要先转存平台素材库；Discord 只把图片 URL 作为 embed 立即镜像。QQ 不支持回复链与话题线程，Telegram 支持论坛话题（`message_thread_id`）。跨平台（QQ ↔ Telegram ↔ Discord）只转发文本，媒体句柄不通用，正文保留 `[图片]` 等占位。
-- QQ 官方机器人在群聊默认只能收到 @ 消息；全量群消息需在开放平台开通权限，并受官方主动消息频控约束。Telegram 需要在 BotFather 关闭 privacy mode 才能收到群内全部消息。Discord 需要在 Developer Portal 打开 Message Content Intent（否则 Gateway 以 4014 关闭）。
-- 与真实 QQ / Telegram / Discord 端联调需要用户提供 QQ AppID/ClientSecret、Telegram bot token、Discord bot token 与机器人环境；仓库内 QQ 用真实 HTTP + WebSocket 假服务端、Telegram 用真实 HTTP 长轮询假服务端、Discord 用真实 HTTP REST + WebSocket Gateway 假服务端验证协议链路。
+- 已内置 QQ 官方机器人（API v2）、Telegram Bot API（长轮询）、Discord Bot Gateway（WebSocket + REST v10）与微信机器人（腾讯 iLink 长轮询）。
+- 入站只处理文本与常见消息段（图片/语音/文件转为占位文本）；不把媒体内容落盘。Telegram 的群/私聊镜像可直接复用 `file_id` 转发媒体；QQ 需要先转存平台素材库；Discord 只把图片 URL 作为 embed 立即镜像；微信只保留占位（CDN 内容加密）。QQ 不支持回复链与话题线程，Telegram 支持论坛话题（`message_thread_id`）。跨平台（QQ ↔ Telegram ↔ Discord ↔ 微信）只转发文本，媒体句柄不通用，正文保留 `[图片]` 等占位。
+- QQ 官方机器人在群聊默认只能收到 @ 消息；全量群消息需在开放平台开通权限，并受官方主动消息频控约束。Telegram 需要在 BotFather 关闭 privacy mode 才能收到群内全部消息。Discord 需要在 Developer Portal 打开 Message Content Intent（否则 Gateway 以 4014 关闭）。微信 token 只能由扫码脚本取得，且官方客户端只建模单聊。
+- 与真实 QQ / Telegram / Discord / 微信端联调需要用户提供 QQ AppID/ClientSecret、Telegram bot token、Discord bot token、微信扫码得到的 bot token 与机器人环境；仓库内 QQ 用真实 HTTP + WebSocket 假服务端、Telegram 用真实 HTTP 长轮询假服务端、Discord 用真实 HTTP REST + WebSocket Gateway 假服务端、微信用真实 HTTP iLink 假服务端验证协议链路。
 - 插件静态订阅 `console:line`，无法运行期退订；高噪音环境靠 `consoleForward` / `forwardCategories` 控制转发。
 - 内存环形缓存，不落盘；需要历史时应由宿主查询或后续接持久化。
 - 尚未与真实 MCSUP 宿主 + Minecraft 服务器联调；真实宿主联调放在下一阶段。

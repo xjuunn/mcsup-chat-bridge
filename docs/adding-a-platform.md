@@ -31,6 +31,7 @@ src/builtin-platforms.ts     # BUILTIN_PLATFORMS 注册一行
 test/<id>.test.ts            # 协议收发用例
 test/helpers/platform-contract.ts  # 契约断言（复用）
 scripts/real-host-check.mjs  # 真实宿主装配检查（含 setup 字段）
+scripts/<id>-login.mjs       # 可选：平台只能扫码/设备码登录时，取得 token 的脚本
 README.md                    # 配置表 + 平台小节
 ```
 
@@ -63,6 +64,15 @@ matrix: s.optional(
 
 同时把 `platforms` 的 `choices` 与 `setInvalidateOption` 的键补上；插件
 `src/index.ts` 的 `bind.servers` 只需要在适配器有 `server` 覆盖项时才加。
+
+单聊形态的平台（参考 `src/platforms/weixin.ts`）不要照抄 `groups` /
+`syncChannels` / `forwardMedia`：它们只制造「配置了却永远用不上」的字段。
+官方客户端只有一对一会话时，`allowPrivate` 可以默认 `true`（否则装完没有
+任何反应），同时仍受 `allowedUsers` / `privateUsers` 与全局 `privateSync` 约束。
+
+某些平台（如微信 iLink）的 token 只能在用户终端扫码取得，宿主无法代劳：
+在 `scripts/` 下加一个只用 Node 标准库的登录脚本，打印 token 并可选
+`--apply` 写入 `mcsup plugin config set`；插件自身仍然不落盘密钥。
 
 ### 3.2 解析配置
 
@@ -177,6 +187,8 @@ export const BUILTIN_PLATFORMS: readonly PlatformFactory[] = [
    - 出站：格式化、目标（配置 / 学习）、媒体或分片、失败重试。
    - 入站：群 / 私聊、白名单、`inbound=false` 只同步不注入、去重。
    - `relay`：只发到本平台会话，不回流入站。
+   - 参考：`test/weixin.test.ts` 展示了「假 HTTP 长轮询 + uint64 保精度 +
+     context token 重试 + `-14` 暂停」的写法。
 2. `test/platform-contract.test.ts`：给内置平台跑契约；新平台加一行
    `await expectPlatformContract(matrixPlatformFactory, { settings })`。
 3. `scripts/real-host-check.mjs`：装配层校验（能力、setup 字段、schema 默认值）。

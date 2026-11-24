@@ -58,11 +58,18 @@ assert(
   discordSecretSchema !== undefined && discordSecretSchema["x-mcsup-secret"] === true,
   "descriptor 未把 Discord botToken 标记为 x-mcsup-secret",
 );
-// 安装向导的平台凭据靠 setup.fields[].when 条件提问：schema 必须是 4，
-// 且条件只能依赖排在前面的 platforms 字段，否则宿主会拒绝整个 descriptor。
+const weixinSecretSchema =
+  descriptor.schemas?.config?.properties?.weixin?.properties?.botToken;
 assert(
-  descriptor.schema === 4,
-  `descriptor.schema 应为 4（setup.when 需要），实际 ${descriptor.schema}`,
+  weixinSecretSchema !== undefined && weixinSecretSchema["x-mcsup-secret"] === true,
+  "descriptor 未把 Weixin botToken 标记为 x-mcsup-secret",
+);
+// 安装向导的平台凭据靠 setup.fields[].when 条件提问：schema 至少是 4，
+// 且条件只能依赖排在前面的 platforms 字段，否则宿主会拒绝整个 descriptor。
+// 微信扫码登录额外要求 schema 5，所以整份 descriptor 应升到 5。
+assert(
+  descriptor.schema === 5,
+  `descriptor.schema 应为 5（setup.interactive 需要），实际 ${descriptor.schema}`,
 );
 const setupFields = descriptor.setup?.fields ?? [];
 const fieldIndex = new Map(setupFields.map((field, index) => [field.path, index]));
@@ -73,6 +80,7 @@ for (const [path, platform] of [
   ["qq.clientSecret", "qq"],
   ["telegram.botToken", "telegram"],
   ["discord.botToken", "discord"],
+  ["weixin.botToken", "weixin"],
 ]) {
   const field = setupFields[fieldIndex.get(path)];
   assert(field !== undefined, `setup 缺少 ${path} 字段`);
@@ -89,6 +97,19 @@ for (const [path, platform] of [
     `setup.${path} 的标签不该带括号提示，实际「${field.label}」`,
   );
 }
+// 微信没有可粘贴的 token：这个字段必须声明 interactive，宿主才会拉起插件
+// 走扫码流程；其它平台仍是普通密钥输入，不能被误标成交互式。
+for (const field of setupFields) {
+  const expected = field.path === "weixin.botToken";
+  assert(
+    field.interactive === expected || (expected === false && field.interactive === undefined),
+    `setup.${field.path} 的 interactive 应为 ${expected}，实际 ${JSON.stringify(field.interactive)}`,
+  );
+}
+assert(
+  setupFields[fieldIndex.get("weixin.botToken")]?.secret === true,
+  "setup.weixin.botToken 必须是 secret 字段（interactive 要求 secret）",
+);
 // 私聊同步是全局开关：只问一次，所以不能挂 `when`（否则又变成按平台提问），
 // 必须是布尔且默认关闭——陌生人不该在装完之后就能直接私聊机器人。
 const privateSync = setupFields[fieldIndex.get("privateSync")];

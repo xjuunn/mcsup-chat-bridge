@@ -13,6 +13,7 @@ import { logPlatformFactory } from "./platforms/log.js";
 import { nullPlatformFactory } from "./platforms/null.js";
 import { qqPlatformFactory } from "./platforms/qq.js";
 import { telegramPlatformFactory } from "./platforms/telegram.js";
+import { weixinPlatformFactory } from "./platforms/weixin.js";
 
 /** 内置平台（按 id 排序展示） */
 export const BUILTIN_PLATFORMS: readonly PlatformFactory[] = [
@@ -21,6 +22,7 @@ export const BUILTIN_PLATFORMS: readonly PlatformFactory[] = [
   nullPlatformFactory,
   qqPlatformFactory,
   telegramPlatformFactory,
+  weixinPlatformFactory,
 ];
 
 /** 新建注册表；`extra` 供测试或上层注入自定义适配器 */

@@ -6,4 +6,4 @@
  * `package.json` 决定（SDK 打包时读取），因此两处必须一致，测试会校验。
  */
 
-export const PLUGIN_VERSION = "0.1.28";
+export const PLUGIN_VERSION = "0.1.29";

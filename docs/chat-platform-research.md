@@ -466,11 +466,12 @@ QQ、Telegram、Discord 与微信各自内部的群↔私聊镜像（`syncChanne
 | 目标 + 载荷 + 送达结果 | 与其它平台相同：同步 `deliver` + 内部出站队列，`status` 计数口径不变 |
 | 平台故障不能拖垮其他平台 | 轮询循环与出站队列各自收口，单条失败只记 warn |
 
-与其它平台不同的三点：
+与其它平台不同的四点：
 
 1. **单聊形态**：官方客户端固定 `ChatType: "direct"`，所有会话都归一为 `private`；不提供群/私聊镜像。`allowPrivate` 默认 `true`，因为否则装完没有任何反应；仍与全局 `privateSync` 取并集并受白名单约束。
 2. **`context_token`**：出站必须回传入站消息带来的会话令牌，否则可能以 `ret=-2 prepare failed` 拒绝。适配器按会话持久化到宿主 KV（`weixin:context`，不是账号凭据），重启后不必等对方先说话。
 3. **uint64 id**：`message_id` / `msg_id` / `svr_id` 超过 2^53，直接 `JSON.parse` 会丢精度；适配器在解析前给这三类对象键的数字字面量加引号。
+4. **显示名**：协议不下发昵称，`from_user_id` 完整值约 40 字符。入站显示名取它的 SHA-256 前 6 位十六进制（`微信用户-xxxxxx`），同一用户跨重启稳定，也不会把 openid 刷进游戏聊天；原始 id 仍用于白名单、出站目标与会话令牌。
 
 token 由 `scripts/weixin-login.mjs` 扫码取得（腾讯没有后台复制入口），插件自身仍不落盘密钥。二维码在终端里由 `scripts/lib/qr.mjs` 零依赖绘制（Byte 模式、纠错等级 L、固定掩码 0），链接同时打印作为兜底。
 

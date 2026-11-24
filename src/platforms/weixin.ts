@@ -16,8 +16,9 @@
  * 设计取舍：
  * - 微信机器人是「一个 bot 对一个人」的单聊形态（官方客户端的 `ChatType`
  *   固定为 `direct`），因此所有会话都归一为 `private`；没有群/私聊镜像。
- * - 协议里没有昵称字段，发言人的显示名只能用它自己的 `from_user_id`，
- *   不编造联系人或手机号。
+ * - 协议里没有昵称字段，发言人显示名由 `from_user_id` 派生成稳定短别名
+ *   （`微信用户-` + SHA-256 前 6 位十六进制），不编造联系人或手机号；
+ *   原始 id 仍用于白名单、出站目标与会话令牌。
  * - 出站要回传入站消息里的 `context_token`，否则服务端可能以
  *   `ret=-2 prepare failed` 拒绝。令牌按会话持久化到宿主 KV（不是账号
  *   凭据），重启后不用等对方先说话。
@@ -27,7 +28,7 @@
  *   账号一小时，这里同样暂停长轮询与出站，避免把失效 token 打成重试风暴。
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { PluginError } from "mcsup-plugin";
 import type { LogClient } from "mcsup-plugin";
@@ -117,6 +118,8 @@ const CONTEXT_LIMIT = 64;
 const SEND_ATTEMPTS = 3;
 /** 最近消息 id 去重窗口 */
 const SEEN_LIMIT = 1_000;
+/** 显示名别名的十六进制位数：约 1677 万种组合，个人服务器不会撞名 */
+const ALIAS_HASH_CHARS = 6;
 /** 长轮询游标的 KV 键 */
 const CURSOR_KEY = "weixin:sync";
 /** 会话上下文令牌的 KV 键（不是账号凭据） */
@@ -279,6 +282,18 @@ export interface WeixinInbound {
   readonly messageId?: string;
   readonly at?: string;
   readonly contextToken?: string;
+}
+
+/**
+ * 由对方 id 派生稳定的短显示名
+ *
+ * 协议不下发昵称，`from_user_id` 是 bot 作用域的 openid（约 40 字符），直接
+ * 当显示名会把游戏聊天刷满。这里取它的 SHA-256 前 6 位十六进制：同一 id 在
+ * 任意重启、任意机器上得到同一别名，长度固定，也不含手机号之类的信息。
+ */
+export function weixinAlias(senderId: string): string {
+  const digest = createHash("sha256").update(senderId, "utf8").digest("hex");
+  return `微信用户-${digest.slice(0, ALIAS_HASH_CHARS)}`;
 }
 
 /**
@@ -804,8 +819,8 @@ export class WeixinPlatform implements ChatPlatform {
     const inbound: PlatformInboundMessage = {
       platform: this.id,
       channel: { kind: "private", id: parsed.senderId },
-      // 协议不提供昵称：用对方 id 作显示名，不编造姓名
-      author: { id: parsed.senderId, name: parsed.senderId },
+      // 协议不提供昵称：显示名用 id 派生的稳定短别名，完整 id 只留在日志与目标里
+      author: { id: parsed.senderId, name: weixinAlias(parsed.senderId) },
       text: parsed.text,
       label: this.settings.label,
       ...(this.settings.inbound ? {} : { inject: false }),

@@ -7,7 +7,7 @@ MCSUP 聊天桥插件：订阅 Minecraft 服务器的聊天、控制台与生命
 QQ、Telegram、Discord 与微信适配器支持**双向互通**：
 
 - 游戏 → 平台：玩家聊天按 `[玩家名]:消息` 发送到群/私聊；
-- 平台 → 游戏：群聊消息（可选私聊）经 `console:write` 注入游戏，显示为 `[QQ] 昵称: 消息` / `[Telegram] 昵称: 消息` / `[Discord] 昵称: 消息` / `[微信] user_id: 消息`；注入方式由 `injectMode` 决定（默认 `say` 会写进服务器日志，`tellraw` 只显示在游戏内）。
+- 平台 → 游戏：群聊消息（可选私聊）经 `console:write` 注入游戏，显示为 `[QQ] 昵称: 消息` / `[Telegram] 昵称: 消息` / `[Discord] 昵称: 消息` / `[微信] 微信用户-xxxxxx: 消息`；注入方式由 `injectMode` 决定（默认 `say` 会写进服务器日志，`tellraw` 只显示在游戏内）。
 - QQ / Telegram / Discord 支持群聊与私聊**互相同步**（`qq.syncChannels` / `telegram.syncChannels` / `discord.syncChannels`）；Telegram 复用 `file_id` 直接转发图片/视频/文件，Discord 用图片 URL 作为 embed 立即镜像。微信官方客户端只建模单聊，因此不提供群/私聊镜像。
 - **私聊同步**：顶层 `privateSync`（默认 `false`）一次决定所有已选平台是否接收私聊，安装向导里问一次；开启后私聊会参与注入游戏、群/私聊镜像与跨平台同步。与各平台的 `allowPrivate` 取并集，关掉它不会覆盖平台里显式打开的配置。
 - **跨平台同步**：四个聊天平台默认互相转发（`crossPlatform=true`），群里或私聊收到的消息会发到其它平台的所有会话；转发形如 `[QQ 群] 昵称: 消息`，来源平台不回发自己。图片等媒体不跨平台搬运，只保留 `[图片]` 占位。
@@ -258,7 +258,7 @@ test/                       分类、存储、分发、桥、入站、QQ、Teleg
 | `weixin.categories` | 沿用全局 | 微信出站类别过滤 |
 | `weixin.inbound` | `true` | 是否把微信消息注入游戏；为 `false` 时仍参与跨平台同步 |
 | `weixin.allowPrivate` | `true` | 微信官方客户端只有单聊形态，默认接收；关闭后既不注入游戏也不参与跨平台同步（顶层 `privateSync=true` 时同样生效，两者取并集） |
-| `weixin.label` | `"微信"` | 游戏内显示为 `[微信] user_id: 消息`（协议没有昵称字段，用 user id 作显示名） |
+| `weixin.label` | `"微信"` | 游戏内显示为 `[微信] 微信用户-xxxxxx: 消息`。协议没有昵称字段，显示名由 `from_user_id` 派生成稳定短别名（SHA-256 前 6 位十六进制） |
 | `weixin.server` | 全局 | 该适配器的入站默认服务器，同时决定插件跟随哪台服务器启停 |
 | `weixin.maxLength` | `1500` | 单条出站上限，超出按此分片（微信没有公开上限，按保守值切分） |
 | `weixin.sendIntervalMs` | `1000` | 两次 iLink 调用的最小间隔，温柔限流 |
@@ -765,8 +765,8 @@ DM channel 缓存、分片、频道/私聊镜像与图片 embed、跨平台 `rel
 | --- | --- | --- |
 | 游戏 → 微信 | `[玩家名]:消息` | 玩家聊天严格使用此格式 |
 | 游戏 → 微信（非聊天） | `[加入] Alex: Alex 加入了游戏` | 用中文类别标签 |
-| 微信 → 游戏 | `[微信] user_id: 消息` | 协议没有昵称字段，显示名用对方的 `from_user_id`，不编造姓名 |
-| 微信 → 其它平台 | `[微信 私聊] user_id: 消息` | 跨平台同步（`crossPlatform`），发到 QQ / Telegram / Discord 的所有会话；不回发来源平台 |
+| 微信 → 游戏 | `[微信] 微信用户-xxxxxx: 消息` | 协议没有昵称字段，显示名由对方的 `from_user_id` 派生成稳定短别名（SHA-256 前 6 位十六进制），不会把完整 openid 写进聊天 |
+| 微信 → 其它平台 | `[微信 私聊] 微信用户-xxxxxx: 消息` | 跨平台同步（`crossPlatform`），发到 QQ / Telegram / Discord 的所有会话；不回发来源平台 |
 
 入站把 `item_list` 归一为文本：`type=1` 取 `text_item.text`；`type=3` 优先用
 `voice_item.text`（语音转写），没有转写时保留 `[语音]`；图片 / 视频 / 文件分别转为
@@ -786,8 +786,8 @@ DM channel 缓存、分片、频道/私聊镜像与图片 embed、跨平台 `rel
 - **过滤**：`weixin.allowedUsers` 收窄发言人，`weixin.privateUsers` 收窄私聊对象；
   被丢弃时按发送者告警一次并打印可填进配置的 user_id。
 - **跨平台同步**：`crossPlatform=true`（默认）时，微信收到的消息会以
-  `[微信 私聊] user_id: 消息` 发给其它平台的全部会话；转发走适配器自己的出站队列，
-  不回流 `ctx.inbound`，因此不会成环。
+  `[微信 私聊] 微信用户-xxxxxx: 消息` 发给其它平台的全部会话；转发走适配器自己的
+  出站队列，不回流 `ctx.inbound`，因此不会成环。
 
 ### 已知限制
 
@@ -796,7 +796,9 @@ DM channel 缓存、分片、频道/私聊镜像与图片 embed、跨平台 `rel
 - **扫码后无法获取 token 的情况**：服务端返回 `binded_redirect` 表示该微信号已绑定过
   另一个客户端，不会再签发 token；脚本会直接说明原因。
 - 官方客户端只建模单聊，本项目不假设微信群机器人会话存在；群聊需要腾讯后续开放协议。
-- 协议不提供发言人昵称，游戏内只能用 user id；需要更友好的名字得另建一份 id → 昵称映射。
+- 协议不提供发言人昵称，也不提供用户资料或通讯录接口；游戏内显示的是由 `from_user_id`
+  派生的稳定短别名 `微信用户-xxxxxx`。同一个 id 跨重启不变，但别名不是真实昵称；需要
+  真实姓名只能另行人工绑定（当前不提供）。
 - 媒体只有占位：不解密 CDN 内容，也不跨平台搬运图片 / 语音 / 文件。
 
 ### 本地验证

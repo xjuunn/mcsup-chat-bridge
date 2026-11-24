@@ -8,6 +8,7 @@ import {
   parseWeixinJson,
   parseWeixinMessage,
   parseWeixinSettings,
+  weixinAlias,
   weixinInboundText,
   WeixinPlatform,
 } from "../src/platforms/weixin.js";
@@ -374,6 +375,20 @@ describe("微信消息归一化", () => {
       at: AT,
     });
   });
+
+  it("由 user id 派生稳定短别名作显示名", () => {
+    const id = "o9cq807-h3vWKMzqjF9ysuPMTbhQ@im.wechat";
+    const alias = weixinAlias(id);
+    expect(alias).toBe("微信用户-81b249");
+    expect(weixinAlias(id)).toBe(alias);
+    expect(alias).toMatch(/^微信用户-[0-9a-f]{6}$/);
+    expect(alias.length).toBeLessThan(20);
+  });
+
+  it("不同 user id 得到不同别名", () => {
+    expect(weixinAlias("42")).toBe("微信用户-73475c");
+    expect(weixinAlias("43")).not.toBe(weixinAlias("42"));
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -393,7 +408,7 @@ describe("微信收发", () => {
     expect(inbound[0]).toMatchObject({
       platform: "weixin",
       channel: { kind: "private", id: "42" },
-      author: { id: "42", name: "42" },
+      author: { id: "42", name: "微信用户-73475c" },
       text: "你好",
       label: "微信",
       messageId: "1845000000000001",

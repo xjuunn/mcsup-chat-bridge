@@ -245,7 +245,6 @@ try {
             `写入 token 文件失败：${error instanceof Error ? error.message : String(error)}`,
           );
         }
-        process.stdout.write("\n已把 token 交给安装向导，继续完成剩余配置…\n");
         process.exit(0);
       }
 
@@ -385,7 +384,7 @@ function printQr(qr) {
   }
 
   // 新宿主接管排版：只交出内容，二维码由宿主按终端宽度居中渲染
-  if (emitUi({ type: "qr", content: qr.content, label: "用手机微信扫描下面的二维码" })) {
+  if (emitUi({ type: "qr", content: qr.content, label: "微信登录二维码" })) {
     if (options.open) {
       openUrl(qr.content);
     }

@@ -55,7 +55,9 @@ mcsup plugin install --from .\build
 2. 按插件 `setup` 声明逐项询问配置，字段帮助由插件随 descriptor 提供
    （`setup.fields[].help`，需要支持 descriptor schema 6 的宿主）：
    - 短说明（平台代号、注入方式、私聊开关、入站服务器）用 `inline` 贴在
-     控件旁，不单独占行；需要去平台申请的凭据用 `steps` 打印编号步骤和官方链接；
+     控件旁，不单独占行；需要去平台申请的凭据用 `steps` 打印编号步骤和官方
+     链接，最后一步说明该平台需要为机器人开启的权限（群消息读取与发送等），
+     不需要额外权限的平台不写这一条；微信只提示扫码；
    - `启用的平台` 是多选框：`■`/`□` 表示是否选中，空格切换、回车确认；
    - `游戏内注入方式` 是单选项；`入站服务器` 从已注册服务器中单选（必填），
      还没有服务器时才退回手输；`同步私聊消息` 是**全局开关**（默认「否」），
@@ -68,7 +70,7 @@ mcsup plugin install --from .\build
      （`setup.fields[].when`，需要支持 descriptor schema 4 的宿主）；被问到时都是必填，
      留空会提示后重新提问。微信 token 不能从后台复制：宿主支持 descriptor schema 5 时
      **安装向导会直接拉起插件完成扫码**（`setup.fields[].interactive`），二维码经
-     `MCSUP_SETUP_UI_FILE` 交给宿主按终端宽度居中渲染；扫码后 token 经 0600 临时文件
+     `MCSUP_SETUP_UI_FILE` 交给宿主从行首渲染；扫码后 token 经 0600 临时文件
      回传，不用手工复制。服务端建议的 iLink 基址（`weixin.apiBase`）**不是提问项**：
      它写在 config schema 里，由同一次扫码自动回填；扫码没给时适配器用默认地址。旧宿主
      会退回单 token 回传与插件自绘二维码，可先运行 `node scripts/weixin-login.mjs` 扫码再粘贴；

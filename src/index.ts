@@ -224,6 +224,7 @@ export const plugin = definePlugin({
             "打开 https://q.qq.com/ 登录 QQ 开放平台",
             "创建或选择机器人，进入「开发设置」",
             "复制「AppID」；同页的「AppSecret」就是下一步的 ClientSecret",
+            "在开放平台为机器人开启群聊消息接收与发送权限；群里需 @ 机器人才会响应",
           ],
           links: [{ label: "QQ 机器人文档", url: "https://bot.q.qq.com/wiki/" }],
         },
@@ -259,6 +260,7 @@ export const plugin = definePlugin({
             "在 Telegram 打开 @BotFather：https://t.me/BotFather",
             "发送 /newbot，按提示设置显示名与以 bot 结尾的用户名",
             "复制回复里的 HTTP API token；已有机器人用 /token 重新获取",
+            "群聊默认只收到 @ 与命令消息；要读取全部消息，在 @BotFather 用 /setprivacy 关闭隐私模式，再把机器人移出并重新加群",
           ],
           links: [
             { label: "Bot 教程", url: "https://core.telegram.org/bots/tutorial" },
@@ -278,6 +280,7 @@ export const plugin = definePlugin({
             "打开 https://discord.com/developers/applications 并登录",
             "New Application → 左侧 Bot → Reset Token，复制 token",
             "在同一页打开 Message Content Intent，否则收不到消息内容",
+            "邀请机器人入群时勾选 Read Messages 与 Send Messages 权限",
           ],
           links: [
             {
@@ -298,15 +301,7 @@ export const plugin = definePlugin({
         label: "微信 Bot Token",
         help: {
           style: "steps",
-          title: "用手机微信扫码登录",
-          steps: [
-            "手机微信准备好扫码，不需要在后台注册或复制 token",
-            "下方会拉起插件显示二维码，用手机微信扫描",
-            "按手机提示确认，token 由插件直接写回",
-          ],
-          links: [
-            { label: "协议参考", url: "https://github.com/Tencent/OpenClaw-Weixin" },
-          ],
+          steps: ["用手机微信扫码并按提示确认"],
         },
         when: { path: "platforms", includes: "weixin" },
       },

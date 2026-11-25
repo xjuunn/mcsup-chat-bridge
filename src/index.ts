@@ -165,6 +165,9 @@ export const plugin = definePlugin({
   // 开关默认安全值，装完再用 `config set` 打开。
   // 平台凭据用 `when` 条件提问：没选 qq 就完全不问 QQ 凭据，反之亦然
   // （`when` 需要宿主支持 descriptor schema 4）。
+  // 每个字段用 `help`（schema 6）声明教程：短说明用 `inline` 贴在控件旁，
+  // 需要去平台申请的凭据用 `steps` 给操作步骤与官方链接。教程写在插件侧，
+  // 宿主不内置平台知识；没选的平台连提问都不会出现。
   // 微信没有可粘贴的 token：`interactive`（schema 5）让宿主拉起插件，
   // 由插件在终端画二维码并扫码，登录结果经临时密钥文件回传。
   setup: {
@@ -175,42 +178,55 @@ export const plugin = definePlugin({
         default: ["qq"],
         choices: ["qq", "telegram", "discord", "weixin", "log"],
         label: "启用的平台",
-        description:
-          "QQ 官方机器人需要 qq；Telegram 需要 telegram；Discord 需要 discord；微信需要 weixin；本地日志需要 log（可多选）",
+        help: {
+          style: "inline",
+          text: "QQ 官方机器人选 qq；Telegram 选 telegram；Discord 选 discord；微信选 weixin；本地日志选 log（可多选）",
+        },
       },
       {
         path: "injectMode",
         required: true,
         default: "say",
         label: "游戏内注入方式",
-        description:
-          "say（默认）：写入 logs/latest.log，游戏内会多出 [Server] 前缀；tellraw：只显示在游戏内、不写日志，游戏里只有 [QQ]/[Telegram] 标签",
+        help: {
+          style: "inline",
+          text: "say：写入 logs/latest.log，游戏内多出 [Server] 前缀；tellraw：只显示在游戏内、不写日志",
+        },
       },
       {
         path: "privateSync",
         required: true,
         default: false,
         label: "同步私聊消息",
-        description:
-          "全局开关：选「是」后所有已选平台的私聊都参与注入游戏、群/私聊镜像与跨平台同步；默认关闭，避免陌生人私聊机器人",
+        help: {
+          style: "inline",
+          text: "全局开关：选「是」后所有已选平台的私聊都参与注入、镜像与跨平台同步；默认关闭，避免陌生人私聊机器人",
+        },
       },
       {
         path: "inboundServer",
         required: true,
         choicesFrom: "servers",
         label: "入站服务器",
-        description: "平台消息注入哪台服务器；从已注册服务器中选择（qq.server / telegram.server 可单独覆盖）",
+        help: {
+          style: "inline",
+          text: "平台消息注入哪台服务器；从已注册服务器中选择（qq.server / telegram.server 可单独覆盖）",
+        },
       },
       {
         path: "qq.appId",
         required: true,
         label: "QQ AppID",
-        description:
-          "注册步骤：\n" +
-          "  1. 打开 https://q.qq.com/ 登录 QQ 开放平台\n" +
-          "  2. 创建或选择机器人，进入「开发设置」\n" +
-          "  3. 复制「AppID」；同页的「AppSecret」就是下一步的 ClientSecret\n" +
-          "文档：https://bot.q.qq.com/wiki/",
+        help: {
+          style: "steps",
+          title: "获取 QQ AppID",
+          steps: [
+            "打开 https://q.qq.com/ 登录 QQ 开放平台",
+            "创建或选择机器人，进入「开发设置」",
+            "复制「AppID」；同页的「AppSecret」就是下一步的 ClientSecret",
+          ],
+          links: [{ label: "QQ 机器人文档", url: "https://bot.q.qq.com/wiki/" }],
+        },
         // 条件提问：没选 qq 就不问、也不要求 QQ 凭据
         when: { path: "platforms", includes: "qq" },
       },
@@ -219,12 +235,16 @@ export const plugin = definePlugin({
         required: true,
         secret: true,
         label: "QQ ClientSecret",
-        description:
-          "注册步骤：\n" +
-          "  1. 打开 https://q.qq.com/ → 你的机器人 →「开发设置」\n" +
-          "  2. 复制「AppSecret」（即 ClientSecret）\n" +
-          "  3. 重置过密钥就填最新值，旧值会立即失效\n" +
-          "文档：https://bot.q.qq.com/wiki/",
+        help: {
+          style: "steps",
+          title: "获取 QQ ClientSecret",
+          steps: [
+            "打开 https://q.qq.com/ → 你的机器人 →「开发设置」",
+            "复制「AppSecret」（即 ClientSecret）",
+            "重置过密钥就填最新值，旧值会立即失效",
+          ],
+          links: [{ label: "QQ 机器人文档", url: "https://bot.q.qq.com/wiki/" }],
+        },
         when: { path: "platforms", includes: "qq" },
       },
       {
@@ -232,12 +252,18 @@ export const plugin = definePlugin({
         required: true,
         secret: true,
         label: "Telegram Bot Token",
-        description:
-          "注册步骤：\n" +
-          "  1. 在 Telegram 打开 @BotFather：https://t.me/BotFather\n" +
-          "  2. 发送 /newbot，按提示设置显示名与以 bot 结尾的用户名\n" +
-          "  3. 复制回复里的 HTTP API token；已有机器人用 /token 重新获取\n" +
-          "文档：https://core.telegram.org/bots/tutorial",
+        help: {
+          style: "steps",
+          title: "获取 Telegram Bot Token",
+          steps: [
+            "在 Telegram 打开 @BotFather：https://t.me/BotFather",
+            "发送 /newbot，按提示设置显示名与以 bot 结尾的用户名",
+            "复制回复里的 HTTP API token；已有机器人用 /token 重新获取",
+          ],
+          links: [
+            { label: "Bot 教程", url: "https://core.telegram.org/bots/tutorial" },
+          ],
+        },
         when: { path: "platforms", includes: "telegram" },
       },
       {
@@ -245,12 +271,21 @@ export const plugin = definePlugin({
         required: true,
         secret: true,
         label: "Discord Bot Token",
-        description:
-          "注册步骤：\n" +
-          "  1. 打开 https://discord.com/developers/applications 并登录\n" +
-          "  2. New Application → 左侧 Bot → Reset Token，复制 token\n" +
-          "  3. 在同一页打开 Message Content Intent，否则收不到消息内容\n" +
-          "文档：https://discord.com/developers/docs/quick-start/getting-started",
+        help: {
+          style: "steps",
+          title: "获取 Discord Bot Token",
+          steps: [
+            "打开 https://discord.com/developers/applications 并登录",
+            "New Application → 左侧 Bot → Reset Token，复制 token",
+            "在同一页打开 Message Content Intent，否则收不到消息内容",
+          ],
+          links: [
+            {
+              label: "Discord 开发者文档",
+              url: "https://discord.com/developers/docs/quick-start/getting-started",
+            },
+          ],
+        },
         when: { path: "platforms", includes: "discord" },
       },
       {
@@ -261,12 +296,18 @@ export const plugin = definePlugin({
         secret: true,
         interactive: true,
         label: "微信 Bot Token",
-        description:
-          "注册步骤：\n" +
-          "  1. 手机微信准备好扫码，不需要在后台注册或复制 token\n" +
-          "  2. 下方会拉起插件显示二维码，用手机微信扫描\n" +
-          "  3. 按手机提示确认，token 由插件直接写回\n" +
-          "参考：https://github.com/Tencent/OpenClaw-Weixin",
+        help: {
+          style: "steps",
+          title: "用手机微信扫码登录",
+          steps: [
+            "手机微信准备好扫码，不需要在后台注册或复制 token",
+            "下方会拉起插件显示二维码，用手机微信扫描",
+            "按手机提示确认，token 由插件直接写回",
+          ],
+          links: [
+            { label: "协议参考", url: "https://github.com/Tencent/OpenClaw-Weixin" },
+          ],
+        },
         when: { path: "platforms", includes: "weixin" },
       },
     ],

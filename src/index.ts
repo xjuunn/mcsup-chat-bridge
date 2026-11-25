@@ -60,17 +60,6 @@ function bridgeOf(ctx: object): ChatBridge {
 }
 
 /**
- * 把宿主能力适配成 `GamePort`。
- *
- * 注入方式由 `injectMode` 决定：
- * - `tellraw @a <JSON 文本组件>`：游戏里只显示插件自己的标签（如 `[QQ]` / `[Telegram]`），
- *   不会像 `say` 那样多出 `[Server]` 前缀；原版不会把它写进服务器日志。
- * - `say <文本>`：会写进服务器 `logs/latest.log`（`[Not Secure] [Server] ...`），
- *   且没有玩家在线时也能记录；代价是游戏内会多一个 `[Server]` 前缀。
- *
- * 两者都会做控制字符清理，避免消息里的换行/制表符破坏命令行。
- */
-/**
  * 读取可选能力。
  *
  * SDK 对「已声明但未授予」的成员挂的是抛 `denied` 的 getter，直接访问会让
@@ -89,6 +78,17 @@ function capabilityOf<T>(ctx: object, name: string): T | undefined {
   }
 }
 
+/**
+ * 把宿主能力适配成 `GamePort`。
+ *
+ * 注入方式由 `injectMode` 决定：
+ * - `tellraw @a <JSON 文本组件>`：游戏里只显示插件自己的标签（如 `[QQ]` / `[Telegram]`），
+ *   不会像 `say` 那样多出 `[Server]` 前缀；原版不会把它写进服务器日志。
+ * - `say <文本>`：会写进服务器 `logs/latest.log`（`[Not Secure] [Server] ...`），
+ *   且没有玩家在线时也能记录；代价是游戏内会多一个 `[Server]` 前缀。
+ *
+ * 两者都会做控制字符清理，避免消息里的换行/制表符破坏命令行。
+ */
 function createGamePort(ctx: object, log: LogClient): GamePort | undefined {
   const writer = capabilityOf<RuntimeCapabilities["console:write"]>(ctx, "console:write");
   if (writer === undefined) {

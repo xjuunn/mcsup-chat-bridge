@@ -19,7 +19,7 @@
 
 ## 环境与构建
 
-需要 Node.js 20 以上。SDK 依赖同级的 `../mcsup/sdks/typescript`，首次构建前先在该仓库完成 `npm install`。
+需要 Node.js 20 以上。SDK 依赖同级的 `../mcsup/sdks/typescript`，首次构建前先在该仓库完成 `npm install` 与 `npm run build`。
 
 ```bash
 npm install
@@ -31,6 +31,21 @@ npm run verify        # 上述四步一次跑完
 ```
 
 `npm run build` 产出可安装目录 `build/`：`manifest.json`、`descriptor.json`、启动器、`dist/`、`setup/` 与 vendored `node_modules/`。产物内是真实目录，不含符号链接。
+
+## 发布
+
+推送 `v*` tag 即触发 GitHub Actions 构建并创建 Release，产物为 `mcsup-chat-bridge-<version>.zip` 与 `.sha256`。tag 去掉 `v` 后必须等于 `package.json` 与 `src/version.ts` 里的版本，否则工作流失败。
+
+```bash
+git tag v0.1.30
+git push origin v0.1.30
+```
+
+用户安装：
+
+```bash
+mcsup plugin install --url https://github.com/<owner>/<repo>/releases/download/<tag>/mcsup-chat-bridge-<version>.zip
+```
 
 ## 目录结构
 

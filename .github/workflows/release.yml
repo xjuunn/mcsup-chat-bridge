@@ -1,0 +1,67 @@
+name: Release plugin
+
+# 推送 v* tag 时构建并发布到 GitHub Release：
+#   mcsup plugin install --url https://github.com/<owner>/<repo>/releases/download/<tag>/mcsup-chat-bridge-<version>.zip
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@v4
+        with:
+          path: plugin
+
+      # 插件以 file:../mcsup/sdks/typescript 引用 SDK，两者必须是同级目录
+      - name: Checkout SDK
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/mcsup
+          path: mcsup
+          token: ${{ secrets.MCSUP_SDK_TOKEN || github.token }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install and build
+        working-directory: plugin
+        run: |
+          (cd ../mcsup/sdks/typescript && npm ci && npm run build)
+          npm ci
+          npm run build
+
+      - name: Package
+        working-directory: plugin
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          asset="mcsup-chat-bridge-${version}.zip"
+          (cd build && zip -qr "../${asset}" .)
+          shasum -a 256 "$asset" | awk '{print $1}' > "$asset.sha256"
+
+      - name: Release
+        working-directory: plugin
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          asset="mcsup-chat-bridge-${version}.zip"
+          {
+            echo '```'
+            echo "mcsup plugin install --url https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${asset}"
+            echo '```'
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" "$asset" "$asset.sha256" \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag

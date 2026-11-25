@@ -20,6 +20,12 @@ MCSUP 聊天桥插件：把 Minecraft 服务器的聊天、控制台与玩家事
 
 ## 安装
 
+直接从 GitHub Release 安装（无需本地构建）：
+
+```bash
+mcsup plugin install --url https://github.com/xjuunn/mcsup-chat-bridge/releases/download/v0.1.0/mcsup-chat-bridge-0.1.0.zip
+```
+
 从源码构建并安装：
 
 ```bash
@@ -29,6 +35,8 @@ mcsup plugin install --from ./build
 ```
 
 `build/` 是完整安装源，包含 `manifest.json`、`descriptor.json`、启动器与运行期依赖。安装前可用 `mcsup plugin verify ./build` 校验产物。
+
+发布流程：给插件仓库打 `v*` tag（例如 `v0.1.30`，需与 `package.json` 版本一致），GitHub Actions 自动构建并发布 zip 与 `.sha256`。安装器会把 zip 旁的 `.sha256` 作为校验值，也可用 `--sha256` 显式固定。
 
 安装向导依次完成：
 

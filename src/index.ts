@@ -165,9 +165,9 @@ export const plugin = definePlugin({
   // 开关默认安全值，装完再用 `config set` 打开。
   // 平台凭据用 `when` 条件提问：没选 qq 就完全不问 QQ 凭据，反之亦然
   // （`when` 需要宿主支持 descriptor schema 4）。
-  // 每个字段用 `help`（schema 6）声明教程：短说明用 `inline` 贴在控件旁，
-  // 需要去平台申请的凭据用 `steps` 给操作步骤与官方链接。教程写在插件侧，
-  // 宿主不内置平台知识；没选的平台连提问都不会出现。
+  // 每个字段用 `description`（对象形式需 schema 6）声明提示：短说明用 `inline`
+  // 贴在控件旁，需要去平台申请的凭据用 `steps` 给操作步骤与官方链接。内容写在
+  // 插件侧，宿主不内置平台知识；没选的平台连提问都不会出现。
   // 微信没有可粘贴的 token：`interactive`（schema 5）让宿主拉起插件，
   // 由插件在终端画二维码并扫码，登录结果经临时密钥文件回传。
   setup: {
@@ -178,17 +178,13 @@ export const plugin = definePlugin({
         default: ["qq"],
         choices: ["qq", "telegram", "discord", "weixin", "log"],
         label: "启用的平台",
-        help: {
-          style: "inline",
-          text: "QQ 官方机器人选 qq；Telegram 选 telegram；Discord 选 discord；微信选 weixin；本地日志选 log（可多选）",
-        },
       },
       {
         path: "injectMode",
         required: true,
         default: "say",
         label: "游戏内注入方式",
-        help: {
+        description: {
           style: "inline",
           text: "say：写入 logs/latest.log，游戏内多出 [Server] 前缀；tellraw：只显示在游戏内、不写日志",
         },
@@ -198,7 +194,7 @@ export const plugin = definePlugin({
         required: true,
         default: false,
         label: "同步私聊消息",
-        help: {
+        description: {
           style: "inline",
           text: "全局开关：选「是」后所有已选平台的私聊都参与注入、镜像与跨平台同步；默认关闭，避免陌生人私聊机器人",
         },
@@ -208,7 +204,7 @@ export const plugin = definePlugin({
         required: true,
         choicesFrom: "servers",
         label: "入站服务器",
-        help: {
+        description: {
           style: "inline",
           text: "平台消息注入哪台服务器；从已注册服务器中选择（qq.server / telegram.server 可单独覆盖）",
         },
@@ -217,14 +213,14 @@ export const plugin = definePlugin({
         path: "qq.appId",
         required: true,
         label: "QQ AppID",
-        help: {
+        description: {
           style: "steps",
           title: "获取 QQ AppID",
           steps: [
             "打开 https://q.qq.com/ 登录 QQ 开放平台",
             "创建或选择机器人，进入「开发设置」",
             "复制「AppID」；同页的「AppSecret」就是下一步的 ClientSecret",
-            "在开放平台为机器人开启群聊消息接收与发送权限；群里需 @ 机器人才会响应",
+            "在开放平台为机器人开启群聊权限：允许读取群内全部消息、允许主动在群内发言",
           ],
           links: [{ label: "QQ 机器人文档", url: "https://bot.q.qq.com/wiki/" }],
         },
@@ -236,16 +232,6 @@ export const plugin = definePlugin({
         required: true,
         secret: true,
         label: "QQ ClientSecret",
-        help: {
-          style: "steps",
-          title: "获取 QQ ClientSecret",
-          steps: [
-            "打开 https://q.qq.com/ → 你的机器人 →「开发设置」",
-            "复制「AppSecret」（即 ClientSecret）",
-            "重置过密钥就填最新值，旧值会立即失效",
-          ],
-          links: [{ label: "QQ 机器人文档", url: "https://bot.q.qq.com/wiki/" }],
-        },
         when: { path: "platforms", includes: "qq" },
       },
       {
@@ -253,7 +239,7 @@ export const plugin = definePlugin({
         required: true,
         secret: true,
         label: "Telegram Bot Token",
-        help: {
+        description: {
           style: "steps",
           title: "获取 Telegram Bot Token",
           steps: [
@@ -273,7 +259,7 @@ export const plugin = definePlugin({
         required: true,
         secret: true,
         label: "Discord Bot Token",
-        help: {
+        description: {
           style: "steps",
           title: "获取 Discord Bot Token",
           steps: [
@@ -299,7 +285,7 @@ export const plugin = definePlugin({
         secret: true,
         interactive: true,
         label: "微信 Bot Token",
-        help: {
+        description: {
           style: "steps",
           steps: ["用手机微信扫码并按提示确认"],
         },

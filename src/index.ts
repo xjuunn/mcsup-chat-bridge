@@ -220,7 +220,7 @@ export const plugin = definePlugin({
             "打开 https://q.qq.com/ 登录 QQ 开放平台",
             "创建或选择机器人，进入「开发设置」",
             "复制「AppID」；同页的「AppSecret」就是下一步的 ClientSecret",
-            "在开放平台为机器人开启群聊权限：允许读取群内全部消息、允许主动在群内发言",
+            "在机器人设置中：允许读取群内全部消息、允许主动在群内发言",
           ],
           links: [{ label: "QQ 机器人文档", url: "https://bot.q.qq.com/wiki/" }],
         },

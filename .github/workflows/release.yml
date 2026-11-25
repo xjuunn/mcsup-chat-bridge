@@ -47,6 +47,7 @@ jobs:
         working-directory: plugin
         run: |
           version="$(node -p "require('./package.json').version")"
+          test "v${version}" = "$GITHUB_REF_NAME"
           asset="mcsup-chat-bridge-${version}.zip"
           (cd build && zip -qr "../${asset}" .)
           shasum -a 256 "$asset" | awk '{print $1}' > "$asset.sha256"

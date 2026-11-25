@@ -3,8 +3,7 @@
 聊天桥的平台是可插拔点：新增平台只动「配置 + 一个新文件 + 注册一行 + 测试」，
 桥内核（`core/`）、op 层（`ops/`）与入口（`src/index.ts`）都不需要改。
 
-本文是实施清单；`README.md` 的「扩展一个新的聊天平台」保留最小骨架，
-两者配套看。
+本文是实施清单，末尾附最小骨架。
 
 ## 1. 三条链路与生命周期
 
@@ -32,7 +31,8 @@ test/<id>.test.ts            # 协议收发用例
 test/helpers/platform-contract.ts  # 契约断言（复用）
 scripts/real-host-check.mjs  # 真实宿主装配检查（含 setup 字段）
 scripts/<id>-login.mjs       # 可选：平台只能扫码/设备码登录时，取得 token 的脚本
-README.md                    # 配置表 + 平台小节
+docs/configuration.md         # 配置表
+docs/platforms/<id>.md        # 平台协议与限制
 ```
 
 ## 3. 实现步骤
@@ -201,3 +201,139 @@ export const BUILTIN_PLATFORMS: readonly PlatformFactory[] = [
 - [ ] 断线重连退避可被停止打断，日志能看出「连不上」与「凭据错」的区别。
 - [ ] 群 / 私聊两个方向都实测过入站、出站与跨平台转发。
 - [ ] RAM 使用有界：队列上限、入站去重窗口、缓存条数都有常量控制。
+## 7. 最小骨架
+
+下面用假想的 `matrix` 说明骨架。内置适配器可参照 `src/platforms/qq.ts`、
+`src/platforms/telegram.ts`、`src/platforms/discord.ts` 与 `src/platforms/weixin.ts`。
+
+### 7.1 实现 `PlatformFactory`
+
+下面用一个假想的 `matrix` 说明骨架。出站目标解析、队列、积压上限与失败计数
+全部复用 `platform-kit/shared/outbound.ts`，适配器只提供「怎么发」：
+
+```ts
+// src/platforms/matrix.ts
+import { LearnedTargets } from "../core/targets.js";
+import { formatOutbound, formatRelay } from "../platform-kit/format.js";
+import { OutboundQueue, TargetBook } from "../platform-kit/shared/outbound.js";
+import type { NormalizedMessage } from "../core/types.js";
+import type { ChatPlatform, PlatformFactory } from "../platform-kit/types.js";
+
+const OUTBOUND_LIMIT = 512;
+
+export const matrixPlatformFactory: PlatformFactory = {
+  id: "matrix",
+  title: "Matrix",
+  description: "Matrix 客户端 API",
+  create({ log, settings, kv, private: privateSync = false }) {
+    const config = parseMatrixSettings(settings); // 缺凭据抛 PluginError("invalid_input")
+    const learned = new LearnedTargets({ key: "matrix:targets", log, kv, limit: 64 });
+    const targets = new TargetBook({
+      label: "matrix", log, learned,
+      groups: config.groups, users: config.privateUsers,
+      syncChannels: config.syncChannels,
+      noTargetHint: "收到消息后自动补齐",
+      noMirrorHint: "在群里发一条消息，或把 matrix.groups 填成群 id",
+    });
+    const outbound = new OutboundQueue<{ id: string; text: string }>({
+      label: "matrix", title: "Matrix", limit: OUTBOUND_LIMIT, log, targets,
+      isStopping: () => stopping,
+      send: (target, pending) => sendText(target, pending.text),
+    });
+    let stopping = false;
+    return {
+      id: "matrix",
+      title: "Matrix",
+      start(ctx) {
+        if (ctx.signal.aborted) return;
+        ctx.signal.addEventListener("abort", () => {
+          stopping = true;
+          outbound.clear();
+        });
+        // 建立连接；收到外部消息时调用 ctx.inbound({ platform, channel, author, text })
+      },
+      deliver(message: NormalizedMessage) {
+        outbound.push({ id: message.id, text: formatOutbound(message) });
+      },
+      // 可选：实现 relay 就参与跨平台同步；只入自己的队列，禁止回流 ctx.inbound
+      relay(message) {
+        outbound.push({ id: `relay:${message.platform}`, text: formatRelay(message) });
+      },
+      stop(reason) {
+        stopping = true;
+        outbound.clear();
+        log.debug(`[matrix] 断开：${reason}`);
+      },
+    } satisfies ChatPlatform;
+  },
+};
+```
+
+### 7.2 注册
+
+```ts
+// src/builtin-platforms.ts
+import { matrixPlatformFactory } from "./platforms/matrix.js";
+
+export const BUILTIN_PLATFORMS: readonly PlatformFactory[] = [
+  discordPlatformFactory,
+  logPlatformFactory,
+  nullPlatformFactory,
+  qqPlatformFactory,
+  telegramPlatformFactory,
+  matrixPlatformFactory,
+];
+```
+
+### 7.3 加配置字段
+
+```ts
+// src/config.ts，configSchema 内
+matrix: s.optional(
+  s.object(
+    {
+      token: secretInput(s.string({ label: "Access Token", max: 512 })),
+      roomId: s.string({ label: "默认房间", max: 128 }),
+    },
+    { label: "Matrix" },
+  ),
+),
+```
+
+之后配置 `"platforms": ["matrix"]` 就会实例化；`config.matrix` 这个片段会原样传给工厂的 `settings`（schema 内的默认值已由 zod 补齐）。
+
+### 7.4 加测试
+
+```ts
+// test/matrix.test.ts
+import { expectPlatformContract } from "./helpers/platform-contract.js";
+
+it("满足平台最小契约", async () => {
+  await expectPlatformContract(matrixPlatformFactory, { settings: { token: "t", roomId: "r" } });
+});
+```
+
+协议收发行为按 QQ / Telegram / Discord / 微信 的用例写：配置解析、目标（配置与学习）、
+入站白名单、`inbound=false` 只同步不注入、`relay` 不回流。
+
+### 7.5 适配器约定
+
+- `deliver` 由内核串行调用，不会并发；慢只影响自己的队列。
+- 队列满时内核丢最旧消息并计入 `dropped`，适配器不需要处理背压。
+- `deliver` 抛错只计入 `failed` 并记日志，不会打断消费者，也不影响其他平台。
+- 连接、重连、限流、鉴权都由适配器自己负责；内核只提供 `AbortSignal` 与 `stop(reason)`。
+- **入站**：适配器收到外部消息后调用 `ctx.inbound({ platform, channel, author, text, messageId?, inject? })`；
+  内核统一做去重、长度限制、排队、回声抑制，并通过 `ctx.game` 注入游戏。
+  平台自己的 `inbound=false` 设成 `inject: false`，只停注入，消息仍参与跨平台同步；
+  适配器不需要知道服务器选择、注入命令或队列细节。
+- **跨平台**：适配器可选地实现 `relay(message)`，内核会把「其它平台」收到的消息
+  投给它；不实现就永远收不到转发（`log` / `null` 如此）。判断依据是「有没有这个
+  方法」，不是平台 id，新平台无需改内核。`relay` 只把已格式化的文本发进自己的
+  出站队列，禁止回流 `ctx.inbound`，否则会成环；来源平台由内核排除，媒体不跨平台
+  搬运。
+- **降级**：`ctx.game` 在未授予 `console:write` 时为 `undefined`；适配器只负责上报消息，
+  内核会记录失败计数，不要求适配器自己判断权限。
+- **私聊**：`PlatformCreateOptions.private` 是内核下发的全局 `privateSync`，适配器
+  用「自己的 `allowPrivate` 或它」决定是否接收私聊（取并集，不要覆盖平台显式配置）。
+  打开后私聊和群聊走同一条入站链路，无需额外分支。
+- 平台 id 必须匹配 `^[a-z][a-z0-9-]{0,31}$`，且与 `create()` 返回实例的 `id` 一致。

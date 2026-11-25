@@ -66,10 +66,11 @@ assert(
 );
 // 安装向导的平台凭据靠 setup.fields[].when 条件提问：schema 至少是 4，
 // 且条件只能依赖排在前面的 platforms 字段，否则宿主会拒绝整个 descriptor。
-// 微信扫码登录额外要求 schema 5，所以整份 descriptor 应升到 5。
+// 微信扫码登录额外要求 schema 5，结构化字段描述要求 schema 6，
+// 所以整份 descriptor 应升到 6。
 assert(
-  descriptor.schema === 5,
-  `descriptor.schema 应为 5（setup.interactive 需要），实际 ${descriptor.schema}`,
+  descriptor.schema === 6,
+  `descriptor.schema 应为 6（结构化 setup 描述需要），实际 ${descriptor.schema}`,
 );
 const setupFields = descriptor.setup?.fields ?? [];
 const fieldIndex = new Map(setupFields.map((field, index) => [field.path, index]));

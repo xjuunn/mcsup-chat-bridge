@@ -205,7 +205,12 @@ export const plugin = definePlugin({
         path: "qq.appId",
         required: true,
         label: "QQ AppID",
-        description: "QQ 开放平台 → 机器人管理端 → 开发设置；只在启用了 qq 时询问",
+        description:
+          "注册步骤：\n" +
+          "  1. 打开 https://q.qq.com/ 登录 QQ 开放平台\n" +
+          "  2. 创建或选择机器人，进入「开发设置」\n" +
+          "  3. 复制「AppID」；同页的「AppSecret」就是下一步的 ClientSecret\n" +
+          "文档：https://bot.q.qq.com/wiki/",
         // 条件提问：没选 qq 就不问、也不要求 QQ 凭据
         when: { path: "platforms", includes: "qq" },
       },
@@ -214,7 +219,12 @@ export const plugin = definePlugin({
         required: true,
         secret: true,
         label: "QQ ClientSecret",
-        description: "只用于换取 access_token，不会写入日志；只在启用了 qq 时询问",
+        description:
+          "注册步骤：\n" +
+          "  1. 打开 https://q.qq.com/ → 你的机器人 →「开发设置」\n" +
+          "  2. 复制「AppSecret」（即 ClientSecret）\n" +
+          "  3. 重置过密钥就填最新值，旧值会立即失效\n" +
+          "文档：https://bot.q.qq.com/wiki/",
         when: { path: "platforms", includes: "qq" },
       },
       {
@@ -222,7 +232,12 @@ export const plugin = definePlugin({
         required: true,
         secret: true,
         label: "Telegram Bot Token",
-        description: "Telegram 里找 @BotFather，用 /newbot 或 /token 获取；只在启用了 telegram 时询问",
+        description:
+          "注册步骤：\n" +
+          "  1. 在 Telegram 打开 @BotFather：https://t.me/BotFather\n" +
+          "  2. 发送 /newbot，按提示设置显示名与以 bot 结尾的用户名\n" +
+          "  3. 复制回复里的 HTTP API token；已有机器人用 /token 重新获取\n" +
+          "文档：https://core.telegram.org/bots/tutorial",
         when: { path: "platforms", includes: "telegram" },
       },
       {
@@ -231,7 +246,11 @@ export const plugin = definePlugin({
         secret: true,
         label: "Discord Bot Token",
         description:
-          "Discord Developer Portal → 你的应用 → Bot → Reset Token；只在启用了 discord 时询问。还需在 Bot 页打开 Message Content Intent",
+          "注册步骤：\n" +
+          "  1. 打开 https://discord.com/developers/applications 并登录\n" +
+          "  2. New Application → 左侧 Bot → Reset Token，复制 token\n" +
+          "  3. 在同一页打开 Message Content Intent，否则收不到消息内容\n" +
+          "文档：https://discord.com/developers/docs/quick-start/getting-started",
         when: { path: "platforms", includes: "discord" },
       },
       {
@@ -243,7 +262,11 @@ export const plugin = definePlugin({
         interactive: true,
         label: "微信 Bot Token",
         description:
-          "用手机微信扫描终端里的二维码授权，token 由插件直接写回；只在启用了 weixin 时询问",
+          "注册步骤：\n" +
+          "  1. 手机微信准备好扫码，不需要在后台注册或复制 token\n" +
+          "  2. 下方会拉起插件显示二维码，用手机微信扫描\n" +
+          "  3. 按手机提示确认，token 由插件直接写回\n" +
+          "参考：https://github.com/Tencent/OpenClaw-Weixin",
         when: { path: "platforms", includes: "weixin" },
       },
     ],
